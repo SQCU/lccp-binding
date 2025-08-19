@@ -16,6 +16,7 @@ class CompletionRequest(BaseModel):
     temperature: float = 0.8
     stream: bool = False
     include_logits: bool = False
+    include_bigram_logits: bool = False # <-- ADDED: Flag for the new feature
 
 # --- FastAPI App Initialization ---
 app = FastAPI(title="Llama.cpp Server", description="...")
@@ -79,23 +80,21 @@ def process_logits(final_logits: np.ndarray) -> List[Dict[str, Any]]:
 async def get_completion(request: CompletionRequest):
     """Handles requests for model completions."""
     if request.stream:
-        # Streaming logic
+        # Streaming logic (unchanged)
         result_iterator = llm(
             request.prompt, max_tokens=request.max_tokens, temperature=request.temperature, stream=True
         )
         return StreamingResponse(generate_json_chunks(result_iterator), media_type="application/x-ndjson")
     else:
-        # Non-streaming logic
-        logit_capturer = CaptureLogitsProcessor() if request.include_logits else None
+        # --- MODIFIED Non-streaming logic ---
+        full_context_capturer = CaptureLogitsProcessor() if request.include_logits or request.include_bigram_logits else None
         
-        # ACTIVATE YOUR CUSTOM SAMPLERS HERE
-        # For now, let's just use the capturer when requested.
         processors = []
-        if logit_capturer:
-            processors.append(logit_capturer)
-        # To test the custom sampler, uncomment the line below:
+        if full_context_capturer:
+            processors.append(full_context_capturer)
         # processors.append(PenalizeWordProcessor())
 
+        # --- 1. Full Context Evaluation ---
         result = llm(
             request.prompt,
             max_tokens=request.max_tokens,
@@ -103,8 +102,51 @@ async def get_completion(request: CompletionRequest):
             stream=False,
             logits_processor=processors if processors else None,
         )
-        if logit_capturer:
-            result["top_logits"] = process_logits(logit_capturer.last_logits)
+
+        if request.include_logits and full_context_capturer:
+            result["full_context_logits"] = process_logits(full_context_capturer.last_logits)
+        
+        # --- 2. Bigram Context Evaluation (Corrected Logic) ---
+        if request.include_bigram_logits:
+            print("\n[Bigram] Performing second evaluation for the last token.")
+            
+            prompt_tokens = llm.tokenize(request.prompt.encode('utf-8'))
+            
+            if prompt_tokens:
+                last_token = prompt_tokens[-1]
+                last_token_text = llm.detokenize([last_token]).decode('utf-8', 'ignore')
+                print(f"[Bigram] Last token ID: {last_token}, Text: '{repr(last_token_text)}'")
+
+                # Step A: CRITICAL - Reset model state to forget the full context
+                llm.reset()
+                
+                # Step B: Create a NEW capturer for this isolated evaluation
+                bigram_capturer = CaptureLogitsProcessor()
+                
+                # Step C: Perform a separate, 1-token generation to capture the bigram logits
+                # We detokenize the last token back to a string to pass it as a prompt.
+                # We don't care about the text output, only the side-effect on the capturer.
+                _ = llm(
+                    prompt=last_token_text,
+                    max_tokens=1, # We must generate at least one token to trigger the processor
+                    temperature=0.1, # Temperature is irrelevant as we only need the first set of logits
+                    logits_processor=[bigram_capturer]
+                )
+                
+                # Step D: Process the logits captured by the second processor
+                result["bigram_context_logits"] = process_logits(bigram_capturer.last_logits)
+                result["bigram_source_token"] = {
+                    "token_id": last_token,
+                    "token": last_token_text
+                }
+
+            else:
+                print("[Bigram] Prompt was empty, skipping bigram evaluation.")
+                result["bigram_context_logits"] = []
+        
+        # Reset the model state again after the bigram evaluation to ensure the next API call is clean.
+        llm.reset()
+
         return result
 
 # --- Main Execution Block ---

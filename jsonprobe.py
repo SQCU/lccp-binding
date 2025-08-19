@@ -1,4 +1,5 @@
 # jsonprobe.py
+# uv run jsonprobe.py --logits
 import requests
 import json
 import argparse
@@ -21,27 +22,50 @@ def print_top_logits(top_logits):
         print(f"{token_str:<20} | {prob_percent:<15}")
     print("-" * 38)
 
+def print_logit_table(title: str, logits_data: list, source_token_info: dict = None):
+    """Formats and prints a table of top logits."""
+    if not logits_data:
+        print(f"\n--- {title} ---")
+        print("[No logit data returned]")
+        return
+    
+    header = f"--- {title} ---"
+    if source_token_info:
+        token_repr = repr(source_token_info['token'])[1:-1]
+        header += f"\n(Prediction from token: '{token_repr}')"
+
+    print(f"\n{header}")
+    print(f"{'Token':<20} | {'Probability':<15}")
+    print("-" * 38)
+    for item in logits_data:
+        token_str = repr(item['token'])[1:-1]
+        prob_percent = f"{item['probability'] * 100:.2f}%"
+        print(f"{token_str:<20} | {prob_percent:<15}")
+    print("-" * 38)
 
 def main():
     parser = argparse.ArgumentParser(description="Client for the Llama.cpp server")
     parser.add_argument("prompt", type=str, nargs="?", default="The best thing about AI is", help="The prompt to send.")
     parser.add_argument("--stream", action="store_true", help="Enable streaming response.")
-    parser.add_argument("--max-tokens", type=int, default=150, help="Max tokens to generate.")
-    parser.add_argument("--logits", action="store_true", help="Request and display top-24 logits for the next token (non-streaming only).")
+    parser.add_argument("--max-tokens", type=int, default=50, help="Max tokens to generate.")
+    parser.add_argument("--logits", action="store_true", help="Request and display top-24 logits for the full context.")
+    parser.add_argument("--bigram", action="store_true", help="Also request and display top-24 logits for the last token (bigram model).")
     args = parser.parse_args()
 
-    # Logits mode forces non-streaming
-    is_streaming = args.stream and not args.logits
+    # If --bigram is used, we imply --logits to get both sets.
+    request_logits = args.logits or args.bigram
+    is_streaming = args.stream and not request_logits # Logits mode forces non-streaming
 
     headers = {"Content-Type": "application/json"}
     data = {
         "prompt": args.prompt,
         "max_tokens": args.max_tokens,
         "stream": is_streaming,
-        "include_logits": args.logits
+        "include_logits": request_logits,
+        "include_bigram_logits": args.bigram
     }
 
-    print(f"Sending prompt: '{args.prompt}' (Stream: {is_streaming}, Logits: {args.logits})")
+    print(f"Sending prompt: '{args.prompt}' (Stream: {is_streaming}, Logits: {request_logits}, Bigram: {args.bigram})")
     print("-" * 30)
 
     try:
@@ -68,8 +92,11 @@ def main():
             print("--- Generated Text ---")
             print(text)
             
-            if args.logits and "top_logits" in result:
-                print_top_logits(result["top_logits"])
+            if "full_context_logits" in result:
+                print_logit_table("Top 24 (Full Context)", result["full_context_logits"])
+
+            if "bigram_context_logits" in result:
+                print_logit_table("Top 24 (Bigram Context)", result["bigram_context_logits"], result.get("bigram_source_token"))
 
             print("\nRequest complete.")
 
