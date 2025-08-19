@@ -7,19 +7,21 @@
 
 ### Step 1: Install `uv`
 
-If you don't have `uv` installed, you can bootstrap it directly with `pip`. This is the only time you'll need to use `pip` directly.
+python bootstrap.py
 
-```bash
-pip install uv
-```
+### step 2:
+uv run python server.py
+uv run jsonprobe.py --logits
 
 ## llayout
 llama_server_template/
 ├── models/
-├── curltest.sh
-├── README.md
-├── requirements.txt
-├── download_model.py
+├── .gitignore
+├── bootstrap.py    <-- 1.
+├── download_model.py   
 ├── pyproject.toml
-└── server.py
+├── jsonprobe.py    <-- 3.
+├── README.md
+├── server.py       <-- 2.
+└── uv.lock
 
