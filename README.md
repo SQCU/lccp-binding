@@ -14,7 +14,8 @@ uv run python server.py
 uv run jsonprobe.py --logits
 
 ## llayout
-llama_server_template/
+```
+lcpp-binding/
 ├── models/
 ├── .gitignore
 ├── bootstrap.py    <-- 1.
@@ -24,4 +25,4 @@ llama_server_template/
 ├── README.md
 ├── server.py       <-- 2.
 └── uv.lock
-
+```
