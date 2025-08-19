@@ -1,0 +1,27 @@
+[project]
+name = "llama-cpp-server"
+version = "0.1.0"
+description = "A minimal, declarative API server for GGUF models using uv."
+authors = [
+    { name = "Your Name", email = "your@email.com" }
+]
+# uv will respect this constraint during dependency solving.
+# The user is responsible for running uv with a compatible Python interpreter.
+requires-python = ">=3.8"
+dependencies = [
+    "llama-cpp-python[server]",
+    "huggingface-hub",
+    "requests",
+    "numpy",  # <-- ADD THIS LINE
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+# This explicitly tells the build system that this project has no
+# installable Python modules in the root directory. This resolves
+# the "flat-layout" ambiguity and prevents our utility scripts
+# from being treated as part of a distributable package.
+[tool.setuptools]
+packages = []
