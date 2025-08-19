@@ -6,12 +6,13 @@
 - A C++ compiler (`g++`, `clang`, or MSVC on Windows)
 
 ### Step 1: Install `uv`
-
-python bootstrap.py
+`python bootstrap.py`
 
 ### step 2:
+```
 uv run python server.py
 uv run jsonprobe.py --logits
+```
 
 ## llayout
 ```
