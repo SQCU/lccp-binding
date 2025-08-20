@@ -5,14 +5,13 @@
 - Python 3.8+
 - A C++ compiler (`g++`, `clang`, or MSVC on Windows)
 
-### Step 1: Install `uv`
+### Step 1: Install.
 `python bootstrap.py`
 
 ### step 2:
-```
-uv run python server.py
-uv run jsonprobe.py --logits
-```
+write an api wrapper around llamacpp to use ur newly provisioned llamacpp 
+(w/ a programming language where u spend more time writing code than 'building')
+
 
 ## llayout
 ```

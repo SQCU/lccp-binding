@@ -2,154 +2,180 @@
 import os
 import json
 import uvicorn
-import numpy as np
+import asyncio
+import uuid
+import sys
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from llama_cpp import Llama, LogitsProcessor
-from typing import Iterator, List, Dict, Any
+from typing import Coroutine, List, Dict
+from dataclasses import dataclass
+import aiohttp
+
+# --- Configuration ---
+MODEL_FILE = "gemma-3-1b-pt-q4_0.gguf"
+MODEL_PATH = os.path.abspath(os.path.join("models", MODEL_FILE))
+
+MAX_BATCH_SIZE = 8
+BATCH_TIMEOUT = 0.05
+ENGINE_HOST = "127.0.0.1"
+ENGINE_PORT = 8080
+ENGINE_URL = f"http://{ENGINE_HOST}:{ENGINE_PORT}"
 
 # --- Pydantic Models for API ---
 class CompletionRequest(BaseModel):
     prompt: str
     max_tokens: int = 128
     temperature: float = 0.8
-    stream: bool = False
-    include_logits: bool = False
-    include_bigram_logits: bool = False # <-- ADDED: Flag for the new feature
 
-# --- FastAPI App Initialization ---
-app = FastAPI(title="Llama.cpp Server", description="...")
+@dataclass
+class BatchedRequest:
+    uid: str
+    request: CompletionRequest
+    future: asyncio.Future
 
-# --- Load the Model ---
-MODEL_DIR = "models"
-MODEL_FILE = "gemma-3-1b-pt-q4_0.gguf"
-MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILE)
+# Global variable to hold the engine subprocess
+engine_process = None
 
-print("Loading model...")
-llm = Llama(model_path=MODEL_PATH, n_gpu_layers=-1, n_ctx=2048, verbose=True)
-print("Model loaded successfully.")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manages the lifecycle of the native llama.cpp server."""
+    global engine_process
+    
+    executable_name = "server.exe" if sys.platform == "win32" else "server"
+    engine_path = os.path.abspath(os.path.join("engine", executable_name))
+    
+    if not os.path.exists(engine_path):
+        print(f"\nFATAL: Engine executable not found at '{engine_path}'")
+        print("Please run the bootstrap script first: python bootstrap.py\n")
+        sys.exit(1)
 
-# --- LogitsProcessor Definitions ---
+    print("Starting native llama.cpp server engine...")
+    engine_command = [
+        engine_path,
+        "-m", MODEL_PATH,
+        "-c", "2048", # Context size
+        "--port", str(ENGINE_PORT),
+        "--host", ENGINE_HOST,
+        "-b", "512", # Batch size
+        "-ngl", "99" # Number of GPU layers
+    ]
+    
+    engine_process = await asyncio.create_subprocess_exec(
+        *engine_command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
 
-class CaptureLogitsProcessor(LogitsProcessor):
-    """Captures the logits of the very last token generated."""
+    # --- Wait for the server to be ready ---
+    # We can do this by trying to connect to it.
+    is_ready = False
+    for _ in range(20): # Try for 10 seconds
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{ENGINE_URL}/health") as resp:
+                    if resp.status == 200:
+                        print("Native engine is healthy and ready.")
+                        is_ready = True
+                        break
+        except aiohttp.ClientConnectorError:
+            await asyncio.sleep(0.5) # Wait and retry
+            
+    if not is_ready:
+        print("\nFATAL: Native engine failed to start in time.")
+        engine_process.terminate()
+        await engine_process.wait()
+        sys.exit(1)
+        
+    yield # The application is now running
+    
+    print("Shutting down native llama.cpp server engine...")
+    engine_process.terminate()
+    await engine_process.wait()
+    print("Engine shut down gracefully.")
+
+app = FastAPI(title="Llama.cpp Relay Server", lifespan=lifespan)
+
+# --- Batch Manager ---
+class BatchManager:
     def __init__(self):
-        self.last_logits = None
+        self.requests_queue = asyncio.Queue()
 
-    def __call__(self, input_ids: List[int], logits: List[float]) -> List[float]:
-        # --- NOTE THE UPDATED SIGNATURE ---
-        # We accept input_ids but ignore it, as we only need the logits.
-        self.last_logits = np.array(logits)
-        return logits
+    async def add_request(self, request: CompletionRequest) -> Coroutine:
+        future = asyncio.Future()
+        await self.requests_queue.put(
+            BatchedRequest(uid=str(uuid.uuid4()), request=request, future=future)
+        )
+        return await future
 
-class PenalizeWordProcessor(LogitsProcessor):
-    """A custom sampler that penalizes a specific token to make it less likely."""
-    def __init__(self, penalty: float = 2.0):
-        self.word_to_penalize = " the" # Note the leading space
-        self.token_id_to_penalize = llm.tokenize(self.word_to_penalize.encode('utf-8'))[0]
-        self.penalty = penalty
-        print(f"[Custom Sampler] Initialized. Penalizing token ID {self.token_id_to_penalize} ('{self.word_to_penalize}')")
+    async def process_requests_loop(self):
+        print("Batch processor loop started.")
+        while True:
+            first_request = await self.requests_queue.get()
+            batch = [first_request]
+            start_time = asyncio.get_event_loop().time()
+            while (len(batch) < MAX_BATCH_SIZE and (asyncio.get_event_loop().time() - start_time) < BATCH_TIMEOUT and not self.requests_queue.empty()):
+                try:
+                    batch.append(self.requests_queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
 
-    def __call__(self, input_ids: List[int], logits: List[float]) -> List[float]:
-        # --- NOTE THE UPDATED SIGNATURE ---
-        logits[self.token_id_to_penalize] -= self.penalty
-        return logits
+            prompts = [item.request.prompt for item in batch]
+            print(f"Forwarding batch of size {len(prompts)} to native engine...")
 
-# --- Helper Functions ---
+            # --- Forward the entire batch to the C++ server ---
+            payload = {
+                "prompt": prompts,
+                "n_predict": batch[0].request.max_tokens,
+                "temperature": batch[0].request.temperature,
+                # The C++ server uses slots to manage concurrent requests
+                "id_slot": -1 # Let the server manage slots
+            }
+            
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(f"{ENGINE_URL}/completion", json=payload) as resp:
+                        if resp.status == 200:
+                            results = await resp.json()
+                            # The C++ server response format is different
+                            for i, item in enumerate(batch):
+                                # This is a simplified mapping. The actual result
+                                # structure might differ slightly.
+                                content = results.get('content', '') if len(prompts) == 1 else results.get(f'content_{i}', '')
+                                choice = {"text": content, "finish_reason": "stop"}
+                                item.future.set_result(choice)
+                        else:
+                            error_text = await resp.text()
+                            raise Exception(f"Engine returned error {resp.status}: {error_text}")
+            except Exception as e:
+                print(f"[ERROR] Failed to process batch: {e}")
+                for item in batch:
+                    if not item.future.done():
+                        item.future.set_exception(e)
 
-def generate_json_chunks(iterator: Iterator[dict]) -> Iterator[str]:
-    for chunk in iterator:
-        yield f"data: {json.dumps(chunk)}\n\n"
-    yield "data: [DONE]\n\n"
 
-def process_logits(final_logits: np.ndarray) -> List[Dict[str, Any]]:
-    """Calculates and decodes top-k logits from the captured numpy array."""
-    if final_logits is None: return []
-    probs = np.exp(final_logits - np.max(final_logits)) / np.sum(np.exp(final_logits - np.max(final_logits)))
-    top_k_indices = np.argsort(probs)[-24:][::-1]
-    return [{
-        "token_id": int(token_id),
-        "token": llm.detokenize([int(token_id)]).decode('utf-8', 'ignore'),
-        "probability": float(probs[token_id])
-    } for token_id in top_k_indices]
+# --- Instantiate and Register Batch Manager ---
+batch_manager = BatchManager()
 
-# --- API Endpoint ---
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(batch_manager.process_requests_loop())
 
 @app.post("/v1/completions")
 async def get_completion(request: CompletionRequest):
-    """Handles requests for model completions."""
-    if request.stream:
-        # Streaming logic (unchanged)
-        result_iterator = llm(
-            request.prompt, max_tokens=request.max_tokens, temperature=request.temperature, stream=True
-        )
-        return StreamingResponse(generate_json_chunks(result_iterator), media_type="application/x-ndjson")
-    else:
-        # --- MODIFIED Non-streaming logic ---
-        full_context_capturer = CaptureLogitsProcessor() if request.include_logits or request.include_bigram_logits else None
-        
-        processors = []
-        if full_context_capturer:
-            processors.append(full_context_capturer)
-        # processors.append(PenalizeWordProcessor())
-
-        # --- 1. Full Context Evaluation ---
-        result = llm(
-            request.prompt,
-            max_tokens=request.max_tokens,
-            temperature=request.temperature,
-            stream=False,
-            logits_processor=processors if processors else None,
-        )
-
-        if request.include_logits and full_context_capturer:
-            result["full_context_logits"] = process_logits(full_context_capturer.last_logits)
-        
-        # --- 2. Bigram Context Evaluation (Corrected Logic) ---
-        if request.include_bigram_logits:
-            print("\n[Bigram] Performing second evaluation for the last token.")
-            
-            prompt_tokens = llm.tokenize(request.prompt.encode('utf-8'))
-            
-            if prompt_tokens:
-                last_token = prompt_tokens[-1]
-                last_token_text = llm.detokenize([last_token]).decode('utf-8', 'ignore')
-                print(f"[Bigram] Last token ID: {last_token}, Text: '{repr(last_token_text)}'")
-
-                # Step A: CRITICAL - Reset model state to forget the full context
-                llm.reset()
-                
-                # Step B: Create a NEW capturer for this isolated evaluation
-                bigram_capturer = CaptureLogitsProcessor()
-                
-                # Step C: Perform a separate, 1-token generation to capture the bigram logits
-                # We detokenize the last token back to a string to pass it as a prompt.
-                # We don't care about the text output, only the side-effect on the capturer.
-                _ = llm(
-                    prompt=last_token_text,
-                    max_tokens=1, # We must generate at least one token to trigger the processor
-                    temperature=0.1, # Temperature is irrelevant as we only need the first set of logits
-                    logits_processor=[bigram_capturer]
-                )
-                
-                # Step D: Process the logits captured by the second processor
-                result["bigram_context_logits"] = process_logits(bigram_capturer.last_logits)
-                result["bigram_source_token"] = {
-                    "token_id": last_token,
-                    "token": last_token_text
-                }
-
-            else:
-                print("[Bigram] Prompt was empty, skipping bigram evaluation.")
-                result["bigram_context_logits"] = []
-        
-        # Reset the model state again after the bigram evaluation to ensure the next API call is clean.
-        llm.reset()
-
-        return result
+    try:
+        result_choice = await batch_manager.add_request(request)
+        # We can't easily get token counts from the relay, so we return dummy values
+        return JSONResponse(content={
+            "id": "cmpl-" + str(uuid.uuid4()), "object": "text_completion",
+            "model": MODEL_FILE, "choices": [result_choice],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
-    print("Starting Uvicorn server...")
+    print("Starting Uvicorn relay server...")
     uvicorn.run(app, host="127.0.0.1", port=8000)
