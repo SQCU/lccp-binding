@@ -10,6 +10,8 @@ import aiohttp
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
 from pydantic import BaseModel, Field, ConfigDict
 from contextlib import asynccontextmanager 
 
@@ -247,6 +249,9 @@ class CompletionRequest(BaseModel):
     prompt: str
     max_tokens: int = 50
     stream: bool = False
+    # --- ADD THIS LINE ---
+    n_probs: int = Field(alias="n_probs", default=0) # Number of logit probabilities to return
+    # The rest remains the same...
     include_logits: bool = Field(alias="include_logits", default=False)
     include_bigram_logits: bool = Field(alias="include_bigram_logits", default=False)
 
@@ -281,11 +286,18 @@ async def lifespan(app: FastAPI):
 # Initialize components
 # --- ⭐ FIX 3: Register the lifespan manager with the app ---
 app = FastAPI(title="Llama.cpp API Wrapper", lifespan=lifespan)
+# Mount a 'static' directory to serve our HTML, CSS, and JS
+app.mount("/static", StaticFiles(directory="static"), name="static")
 logit_processor = LogitProcessor()
 
 # Defer these initializations until the lifespan startup event
 client_session: Optional[aiohttp.ClientSession] = None
 batching_manager: Optional[BatchingManager] = None
+
+# Add a root endpoint to serve the HTML file
+@app.get("/")
+async def read_index():
+    return FileResponse('static/index.html')
 
 @app.post("/v1/completions")
 async def handle_completion(request: CompletionRequest, raw_request: Request):
@@ -314,6 +326,91 @@ async def handle_completion(request: CompletionRequest, raw_request: Request):
             return JSONResponse(content=result)
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": str(e)})
+
+from fastapi import WebSocket, WebSocketDisconnect
+
+def parse_sse_event(line: bytes) -> Optional[Dict[str, Any]]:
+    """Parses a single line from an SSE stream."""
+    line_str = line.decode('utf-8').strip()
+    if line_str.startswith('data: '):
+        json_str = line_str[len('data: '):]
+        if "[DONE]" in json_str:
+            return None
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+@app.websocket("/ws/generate")
+async def websocket_generate(websocket: WebSocket):
+    """
+    Handles a WebSocket connection for real-time generation with logits.
+    """
+    await websocket.accept()
+    print("🤝 WebSocket connection established.")
+    
+    try:
+        config_data = await websocket.receive_json()
+        
+        request_data = {
+            "prompt": config_data.get("prompt", ""),
+            "max_tokens": config_data.get("max_tokens", 200),
+            "stream": True,
+            "n_probs": 5,
+        }
+
+        print(f"⚡ Starting stream for prompt: '{request_data['prompt'][:50]}...'")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{LLAMA_CPP_URL}/v1/completions",
+                json=request_data,
+                timeout=aiohttp.ClientTimeout(total=3600)
+            ) as response:
+                response.raise_for_status()
+                
+                async for line in response.content:
+                    parsed_data = parse_sse_event(line)
+                    if parsed_data:
+                        #print(f"[RAW SSE DATA]: {parsed_data}")
+                        
+                        choice = parsed_data.get("choices", [{}])[0]
+                        content = choice.get("text", "")
+                        
+                        # --- ⭐ THIS IS THE FIX ⭐ ---
+                        logprobs = None
+                        logprobs_obj = choice.get("logprobs")
+                        if logprobs_obj and logprobs_obj.get("content"):
+                            # The top logprobs are nested inside the first item of the 'content' list.
+                            top_logprobs_list = logprobs_obj["content"][0].get("top_logprobs", [])
+                            
+                            # Reformat the data to match what the client expects:
+                            # A simple list of {'token': str, 'probability': float}
+                            logprobs = []
+                            for item in top_logprobs_list:
+                                # The raw data is in log-probability, convert to linear probability.
+                                # Use math.exp() for this.
+                                import math
+                                logprobs.append({
+                                    "token": item.get("token"),
+                                    "probability": math.exp(item.get("logprob", -float('inf')))
+                                })
+                        
+                        await websocket.send_json({
+                            "content": content,
+                            "logprobs": logprobs
+                        })
+        
+        await websocket.send_json({"status": "done"})
+
+    except WebSocketDisconnect:
+        print("👋 WebSocket connection closed by client.")
+    except Exception as e:
+        print(f"❌ Error in WebSocket handler: {type(e).__name__}: {e}")
+        await websocket.send_json({"error": f"{type(e).__name__}: {e}"})
+    finally:
+        print("🛑 WebSocket session ended.")
 
 # --- 6. Run the API Server ---
 if __name__ == "__main__":

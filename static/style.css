@@ -1,0 +1,190 @@
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: #121212;
+    color: #e0e0e0;
+    line-height: 1.6;
+    margin: 0;
+    padding: 20px;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+h1, h2 {
+    color: #ffffff;
+    border-bottom: 2px solid #4a00e0;
+    padding-bottom: 10px;
+}
+
+.input-area {
+    margin-bottom: 20px;
+}
+
+textarea {
+    width: 100%;
+    padding: 10px;
+    border-radius: 5px;
+    border: 1px solid #333;
+    background-color: #2a2a2a;
+    color: #e0e0e0;
+    font-size: 16px;
+    resize: vertical;
+}
+
+button {
+    display: block;
+    width: 100%;
+    padding: 12px;
+    margin-top: 10px;
+    border: none;
+    border-radius: 5px;
+    background: linear-gradient(90deg, #8e2de2, #4a00e0);
+    color: white;
+    font-size: 18px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: transform 0.2s ease;
+}
+
+button:hover {
+    transform: scale(1.02);
+}
+
+.output-container {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 20px;
+}
+
+.generated-text-card, .logits-card {
+    background-color: #1e1e1e;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+}
+
+#generated-text {
+    white-space: pre-wrap;
+    min-height: 100px;
+}
+
+.logit-item {
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+    font-family: 'Courier New', Courier, monospace;
+}
+
+.token-label {
+    width: 120px;
+    white-space: pre;
+    font-weight: bold;
+}
+
+.prob-bar-container {
+    flex-grow: 1;
+    background-color: #333;
+    border-radius: 4px;
+    height: 20px;
+}
+
+.prob-bar {
+    background: linear-gradient(90deg, #8e2de2, #4a00e0);
+    height: 100%;
+    border-radius: 4px;
+    text-align: right;
+    padding-right: 5px;
+    color: white;
+    font-size: 12px;
+    line-height: 20px;
+    box-sizing: border-box;
+}
+
+/* --- General Layout & Inputs --- */
+.controls {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+#generate-btn {
+    flex-grow: 1;
+}
+
+#add-prompt-btn {
+    background: #444;
+    padding: 12px 20px;
+    border: none;
+    border-radius: 5px;
+    color: white;
+    cursor: pointer;
+    font-size: 16px;
+}
+#add-prompt-btn:hover {
+    background: #555;
+}
+
+#prompts-container {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.prompt-input {
+    width: 100%;
+    padding: 10px;
+    border-radius: 5px;
+    border: 1px solid #333;
+    background-color: #2a2a2a;
+    color: #e0e0e0;
+    font-size: 16px;
+    resize: vertical;
+    box-sizing: border-box;
+}
+
+/* --- Stream Output Layout --- */
+#streams-container {
+    margin-top: 30px;
+    display: grid;
+    /* Create a 2-column grid, but let it wrap to 1 on smaller screens */
+    grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+    gap: 20px;
+}
+
+.stream-card {
+    background-color: #1e1e1e;
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+    display: flex;
+    flex-direction: column;
+}
+
+.stream-card h2 {
+    font-size: 1.2em;
+    padding: 15px 20px;
+    margin: 0;
+    border-bottom: 1px solid #333;
+}
+
+.stream-content {
+    padding: 20px;
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 20px;
+    flex-grow: 1;
+}
+
+.generated-text {
+    white-space: pre-wrap;
+    font-size: 14px;
+    min-height: 100px;
+    background-color: #121212;
+    padding: 10px;
+    border-radius: 5px;
+}
+
+.logits-display .placeholder {
+    color: #888;
+}

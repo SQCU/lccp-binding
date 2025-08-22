@@ -12,12 +12,13 @@ dependencies = [
     "llama-cpp-python[server]",
     "huggingface-hub",
     "requests",
-    "numpy", # <-- ADD THIS LINE
+    "numpy",
     "aiohttp>=3.10.11",
     "GitPython",
     "fastapi",
-    "uvicorn",
+    "uvicorn[standard]",
     "httpx",
+    "sse-starlette",
 ]
 
 [build-system]
