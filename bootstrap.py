@@ -1,10 +1,17 @@
 # bootstrap.py
+# if you're brave
+# python bootstrap.py --with-cuda 
+# if you're wise
+# python bootstrap.py
 import subprocess
 import sys
 import os
 import shutil
 import importlib.util
+import json
 from pathlib import Path
+import argparse # New import for command-line arguments
+
 
 # --- ANSI Color Codes for Better Output ---
 class Colors:
@@ -16,9 +23,6 @@ class Colors:
     FAIL = '\033[91m'
     ENDC = '\033[0m'
     BOLD = '\033[1m'
-
-# bootstrap.py
-# ... (All other code remains the same) ...
 
 def handle_windows_dependencies(base_dir: Path):
     """
@@ -90,11 +94,10 @@ def handle_windows_dependencies(base_dir: Path):
     os.environ['PATH'] = f"{powershell_dir}{os.pathsep}{os.environ['PATH']}"
     # --- ⭐ END OF FIX ⭐ ---
     
-    # We return ONLY the toolchain file argument.
-    return [
-        "-DLLAMA_CURL=ON",
-        f"-DCMAKE_TOOLCHAIN_FILE={toolchain_file.as_posix()}"
-    ]
+    # We now ONLY return the arguments that are unique to the Windows vcpkg setup.
+    return {
+        "CMAKE_TOOLCHAIN_FILE": toolchain_file
+    }
 
     """
     print(f"Providing absolute curl library path: {curl_lib}")
@@ -128,7 +131,7 @@ def copy_windows_dlls(base_dir: Path):
             print(f"{Colors.WARNING}Warning: Could not find '{dll}' to copy.{Colors.ENDC}")
 
 
-def run_command(command, step_name, cwd=None, log_file=None):
+def run_command(command, step_name, cwd=None, log_file=None, env=None):
     log_writer = open(log_file, 'w', encoding='utf-8') if log_file else None
     print(f"{Colors.HEADER}--- {step_name} ---{Colors.ENDC}")
     print(f"{Colors.OKBLUE}Executing command: {' '.join(command)}{Colors.ENDC}")
@@ -142,7 +145,8 @@ def run_command(command, step_name, cwd=None, log_file=None):
             text=True,
             encoding='utf-8',
             bufsize=1,
-            cwd=cwd
+            cwd=cwd,
+            env=env
         )
         for line in process.stdout:
             print(line, end='')
@@ -166,6 +170,63 @@ def run_command(command, step_name, cwd=None, log_file=None):
         # Ensure the log file is always closed
         if log_writer:
             log_writer.close()
+
+# --- ⭐ NEW: The Environment Smasher ---
+def get_msvc_environment() -> dict:
+    """
+    Finds the Visual Studio C++ Build Tools installation and runs vcvarsall.bat
+    to capture the complete, authoritative build environment.
+    """
+    print(f"{Colors.HEADER}--- Finding and Capturing MSVC Build Environment ---{Colors.ENDC}")
+    
+    vswhere_path = Path(os.environ.get("ProgramFiles(x86)")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if not vswhere_path.exists():
+        print(f"{Colors.FAIL}FATAL: 'vswhere.exe' not found. Cannot locate Visual Studio.{Colors.ENDC}")
+        sys.exit(1)
+
+    # This is the robust command to find any installation (IDE or Build Tools)
+    # that has the necessary C++ compiler toolset.
+    cmd = [
+        str(vswhere_path),
+        "-latest",
+        "-products", "*",
+        "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+        "-property", "installationPath",
+        "-format", "json"
+    ]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    install_info = json.loads(result.stdout)
+
+    # Add a clear error message if no installation is found.
+    if not install_info:
+        print(f"{Colors.FAIL}FATAL: No Visual Studio installation with C++ Build Tools found.{Colors.ENDC}")
+        print(f"{Colors.OKCYAN}Please install Visual Studio 2022 with the 'Desktop development with C++' workload.{Colors.ENDC}")
+        sys.exit(1)
+
+    vs_install_path = Path(install_info[0]['installationPath'])
+    
+    vcvarsall_path = vs_install_path / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
+    if not vcvarsall_path.exists():
+        print(f"{Colors.FAIL}FATAL: 'vcvarsall.bat' not found at expected path: {vcvarsall_path}{Colors.ENDC}")
+        sys.exit(1)
+
+    print(f"{Colors.OKGREEN}Found vcvarsall.bat: {vcvarsall_path}{Colors.ENDC}")
+
+    command = f'call "{vcvarsall_path}" x64 && set'
+    result = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
+    
+    env = os.environ.copy()
+    for line in result.stdout.splitlines():
+        if '=' in line:
+            key, value = line.split('=', 1)
+            # --- ⭐ THIS IS THE FIX. SLAM THE KEY TO UPPERCASE. ⭐ ---
+            env[key.upper()] = value
+            
+
+    print(f"{Colors.OKGREEN}Successfully captured MSVC environment.{Colors.ENDC}\n")
+    #print(f"repr:\n{repr(env)}")
+    return env
 
 
 def ensure_uv_is_available():
@@ -216,45 +277,65 @@ def main():
     """
     Main function to orchestrate the entire setup process.
     """
+    parser = argparse.ArgumentParser(description="Bootstrap and build the llama.cpp environment.")
+    parser.add_argument(
+        '--with-cuda',
+        action='store_true',
+        help="Attempt to build llama.cpp with CUDA support. (Default on Linux, Opt-in on Windows)"
+    )
+    args = parser.parse_args()
+
     print(f"{Colors.BOLD}Starting project setup...\n{Colors.ENDC}")
 
     LLAMACPP_DIR = Path("llama.cpp")
     SETUP_PY_SOURCE = Path("trickery/setup.py")
     build_log_path = LLAMACPP_DIR / "build_log.txt"
-
     LLAMACPP_VERSION = "b6208"
 
-    # Step 1: Self-bootstrap uv if it's not present.
     ensure_uv_is_available()
-
-    # Step 2: Run 'uv sync' to create the environment and compile dependencies.
-    # We run 'uv' as a module to avoid any PATH issues.
-    run_command(
-        [sys.executable, "-m", "uv", "sync"],
-        "Step 1: Creating environment and compiling dependencies"
-    )
-
-    # Step 3: Clone llama.cpp (if not present)
+    run_command([sys.executable, "-m", "uv", "sync"], "Step 1: Installing Python build dependencies")
     get_git_repo("https://github.com/ggerganov/llama.cpp.git", LLAMACPP_DIR, commit=LLAMACPP_VERSION)
-    
-    # Step 4: The 'Trickery' - Copy the custom setup.py into llama.cpp
     if not SETUP_PY_SOURCE.exists():
         print(f"{Colors.FAIL}Error: The build script at '{SETUP_PY_SOURCE}' was not found.{Colors.ENDC}")
         sys.exit(1)
-    
     print(f"{Colors.HEADER}--- Step 2: Preparing llama.cpp for building ---{Colors.ENDC}")
     shutil.copy(SETUP_PY_SOURCE, LLAMACPP_DIR / "setup.py")
     print(f"Copied '{SETUP_PY_SOURCE}' to '{LLAMACPP_DIR / 'setup.py'}'")
-    #msvc libcurl error?
-    cmake_extra_args = handle_windows_dependencies(LLAMACPP_DIR)
-    if cmake_extra_args:
-        # Pass the arguments to the setup.py script via an environment variable
-        os.environ["CMAKE_ARGS"] = " ".join(f'"{arg}"' for arg in cmake_extra_args)
-    print(f"{Colors.OKGREEN}--- Preparation complete ---\n{Colors.ENDC}")
 
+    # LLAMACPP COMPILER ARGUMENT HANDLING!!! WOOOO!!! WHO DOESN'T LOVE COMPILER ARGUMENT DRUDGERY?!?!
+    cmake_args = {
+        #"GGML_CUDA": "ON",      # Use the new, non-deprecated flag for GPU acceleration.
+        "LLAMA_CURL": "ON",     # We require CURL for web requests.
+    }
+    build_with_cuda = False
+    if sys.platform == "win32":
+        build_env = get_msvc_environment()
+        dependency_args = handle_windows_dependencies(LLAMACPP_DIR)
+        cmake_args.update(dependency_args)
+        if args.with_cuda:
+            print(f"{Colors.WARNING}--- Attempting experimental CUDA build on Windows as requested. ---{Colors.ENDC}")
+            build_with_cuda = True
+        else:
+            print(f"{Colors.OKBLUE}--- Configuring for a CPU-only build on Windows (default). ---{Colors.ENDC}")
+            print(f"{Colors.OKCYAN}Note: To attempt a CUDA build, re-run with the --with-cuda flag.{Colors.ENDC}")
+            print(f"{Colors.OKCYAN}This requires patching this script to supply NVCC 'toolset' configuration.{Colors.ENDC}\n")
+            # Explicitly disable CUDA
+            cmake_args.update({"GGML_CUDA":"OFF"})
+    else: # Linux and other platforms
+        if not args.with_cuda:
+            print(f"{Colors.OKBLUE}--- Configuring for a CUDA build on Linux (default). ---{Colors.ENDC}")
+            build_with_cuda = True
+        else:
+            # no-accelerator linux users who are trying to install this on a steam deck should reconsider their actions
+            build_with_cuda = True
+    if build_with_cuda:
+        cmake_args.update({"GGML_CUDA":"ON"})
 
-    # Step 2: Build llama.cpp using the Python packaging infrastructure
-    # This is the key change. We let pip and setuptools handle the build.
+    # 3. Format the arguments for the environment variable.
+    cmake_args_str = " ".join(f'-D{key}="{value}"' for key, value in cmake_args.items())
+    os.environ["CMAKE_ARGS"] = cmake_args_str
+    print(f"{Colors.HEADER}--- CMAKE_ARGS configured for build ---\n{cmake_args_str}\n{Colors.ENDC}")
+
     run_command(
         [sys.executable, "setup.py", "build_ext"],
         "Step 3: Building llama.cpp C++ server via custom setup.py",

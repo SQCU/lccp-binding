@@ -5,7 +5,7 @@ import json
 import time
 
 # --- Configuration ---
-BASE_URL = "http://127.0.0.1:8000/v1/completions"
+BASE_URL = "http://127.0.0.1:8080/v1/completions"
 PROMPTS = [
     "The first prompt is about the history of Rome.",
     "Write a python function that calculates a fibonacci sequence.",

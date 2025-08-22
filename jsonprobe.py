@@ -4,7 +4,7 @@ import requests
 import json
 import argparse
 
-BASE_URL = "http://127.0.0.1:8000/v1/completions"
+BASE_URL = "http://127.0.0.1:8080/v1/completions"
 
 def print_top_logits(top_logits):
     """Formats and prints the top_logits data."""

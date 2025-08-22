@@ -5,6 +5,7 @@
 # Ignore the directory containing large model files downloaded from Hugging Face.
 # This is the most important rule for this project.
 models/
+llama.cpp/
 
 
 # --- Python Virtual Environment ---
