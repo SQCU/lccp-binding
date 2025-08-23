@@ -14,6 +14,11 @@
 or
 `uv run concurrent_client.py`
 
+### step 3 (fancy):
+`uv run api_wrapper.py`
+`navigate to http://127.0.0.1:8080 in ur browser`
+`script new behaviors in web client, sample code operating over logits attached for reference` 
+
 ## llayout
 ```
 lcpp-binding/
