@@ -3,357 +3,418 @@
 # python bootstrap.py --with-cuda 
 # if you're wise
 # python bootstrap.py
+import asyncio
 import subprocess
-import sys
-import os
-import shutil
-import importlib.util
 import json
+import time
+import sys # <-- Import sys for platform checking
 from pathlib import Path
-import argparse # New import for command-line arguments
+from typing import List, Dict, Any, Optional
+import math
 
+import aiohttp
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
+from pydantic import BaseModel, Field, ConfigDict
+from contextlib import asynccontextmanager
 
-# --- ANSI Color Codes for Better Output ---
-class Colors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
+# --- 1. Configuration ---
+LLAMACPP_DIR = Path("./llama.cpp")
+DEFAULT_SERVER_EXECUTABLE_NAME = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+DEFAULT_SERVER_PATH = Path("./llama.cpp/build/bin/Release") if sys.platform == "win32" else Path("./llama.cpp/build/bin")
+DEFAULT_SERVER_PATH = DEFAULT_SERVER_PATH / DEFAULT_SERVER_EXECUTABLE_NAME
 
-def handle_windows_dependencies(base_dir: Path):
-    """
-    On Windows, this function ensures vcpkg is set up and provides the necessary
-    CMake arguments to find the curl dependency. On other platforms, it does nothing.
-    """
-    if sys.platform != "win32":
-        return []
+MODEL_PATH = Path("./models/gemma-3-1b-pt-q4_0.gguf")
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 8000
+API_PORT = 8080
+LLAMA_CPP_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
+llama_server_process = None
 
-    print(f"{Colors.OKBLUE}--- Windows platform detected. Checking for dependencies... ---{Colors.ENDC}")
-    
-    vcpkg_dir = base_dir / "vcpkg"
-    curl_pkg_dir = vcpkg_dir / "packages" / "curl_x64-windows"
-    toolchain_file = (vcpkg_dir / "scripts" / "buildsystems" / "vcpkg.cmake").resolve()
-    
-    # --- ⭐ START OF FIX ⭐ ---
-    # Find PowerShell's path and directory reliably.
-    system_root = os.environ.get("SystemRoot", "C:\\Windows")
-    powershell_path = (
-        Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-    )
-    
-    if not powershell_path.exists():
-        print(f"{Colors.FAIL}FATAL: Could not find PowerShell at '{powershell_path}'.")
-        sys.exit(1)
-        
-    # Get the directory containing powershell.exe
-    powershell_dir = powershell_path.parent
-    # --- ⭐ END OF FIX ⭐ ---
+MAX_BATCH_SIZE = 8
+BATCH_TIMEOUT_SECONDS = 0.1 # This is now a more reliable timeout
+CTX_SIZE_PER_REQUEST = 4096 # Assumed context size for a single request in a batch
 
-    if not curl_pkg_dir.exists():
-        print(f"{Colors.WARNING}vcpkg or curl dependency not found. Setting it up...{Colors.ENDC}")
-        if not vcpkg_dir.exists():
-            run_command(
-                ["git", "clone", "https://github.com/microsoft/vcpkg.git", str(vcpkg_dir)],
-                "Cloning vcpkg"
-            )
-        
-        print(f"Found PowerShell at: {powershell_path}")
-        
-        powershell_script_relative_path = Path(".") / "scripts" / "bootstrap.ps1"
-        bootstrap_command = [
-            str(powershell_path),
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-Command", f"& '{powershell_script_relative_path}' -disableMetrics"
+# --- 2. Lifecycle Management (Unchanged) ---
+class ServerLifecycleManager:
+    """Manages the startup and shutdown of the llama.cpp server process."""
+    def __init__(self, executable_path: Path, model_path: Path, host: str, port: int):
+        if not executable_path.exists():
+            raise FileNotFoundError(f"Server executable not found at: {executable_path}")
+        if not model_path.exists():
+            raise FileNotFoundError(f"Model file not found at: {model_path}")
+
+        self.command = [
+            str(executable_path),
+            "-m", str(model_path),
+            "--host", host,
+            "--port", str(port),
+            "--n-gpu-layers", "-1", # Use -1 for max possible, or adjust
+            "--threads", "4",
+            "--parallel", str(MAX_BATCH_SIZE),
+            "--batch-size", "32768",
+            "--ubatch-size", "4096",
+            "--ctx-size", str(CTX_SIZE_PER_REQUEST * MAX_BATCH_SIZE),
+            "--flash-attn",
+            "--top-k", "0",
+            "--top-p", "1.0",
+            "--min-p", "0.02",
         ]
-        
-        run_command(bootstrap_command, "Bootstrapping vcpkg", cwd=vcpkg_dir)
-        
-        vcpkg_exe = vcpkg_dir / "vcpkg.exe"
-        run_command([str(vcpkg_exe), "install", "curl:x64-windows"], "Installing curl via vcpkg", cwd=vcpkg_dir)
+        self.process: Optional[subprocess.Popen] = None
+        self.server_url = f"http://{host}:{port}"
 
-    else:
-        print(f"{Colors.OKGREEN}Found existing vcpkg curl installation.{Colors.ENDC}")
-
-    # ... (Pre-flight checks remain the same) ...
-    print(f"{Colors.HEADER}--- Running Pre-flight Build Checks ---{Colors.ENDC}")
-    if not toolchain_file.exists():
-        print(f"{Colors.FAIL}Build Sanity Check FAILED: vcpkg toolchain file not found at '{toolchain_file}'{Colors.ENDC}")
-        sys.exit(1)
-    else:
-        print(f"{Colors.OKGREEN}OK: Found vcpkg toolchain file.{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}--- Pre-flight Checks Passed ---\n{Colors.ENDC}")
-    
-    # Prepend the PowerShell directory to the PATH environment variable for the build subprocess.
-    # This is the correct way to ensure child processes (like cmake/msbuild) can find it.
-    print(f"Adding '{powershell_dir}' to PATH for the build process.")
-    os.environ['PATH'] = f"{powershell_dir}{os.pathsep}{os.environ['PATH']}"
-    # --- ⭐ END OF FIX ⭐ ---
-    
-    # We now ONLY return the arguments that are unique to the Windows vcpkg setup.
-    return {
-        "CMAKE_TOOLCHAIN_FILE": toolchain_file
-    }
-
-    """
-    print(f"Providing absolute curl library path: {curl_lib}")
-    print(f"Providing absolute curl include path: {curl_include}")
-    
-    return [
-        "-DLLAMA_CURL=ON",
-        f"-DCURL_LIBRARY={curl_lib}",
-        f"-DCURL_INCLUDE_DIR={curl_include}"
-    ]
-    """
-
-def copy_windows_dlls(base_dir: Path):
-    """
-    After a successful build on Windows, copy the required DLLs next to the executable.
-    """
-    if sys.platform != "win32":
-        return
-
-    print(f"{Colors.HEADER}--- Copying required DLLs on Windows ---{Colors.ENDC}")
-    vcpkg_bin_dir = base_dir / "vcpkg" / "installed" / "x64-windows" / "bin"
-    build_bin_dir = base_dir / "build" / "bin"
-    
-    dlls_to_copy = ["libcurl.dll", "zlib1.dll"]
-    for dll in dlls_to_copy:
-        source_dll = vcpkg_bin_dir / dll
-        if source_dll.exists():
-            print(f"Copying '{dll}' to '{build_bin_dir}'")
-            shutil.copy(source_dll, build_bin_dir)
-        else:
-            print(f"{Colors.WARNING}Warning: Could not find '{dll}' to copy.{Colors.ENDC}")
-
-
-def run_command(command, step_name, cwd=None, log_file=None, env=None):
-    log_writer = open(log_file, 'w', encoding='utf-8') if log_file else None
-    print(f"{Colors.HEADER}--- {step_name} ---{Colors.ENDC}")
-    print(f"{Colors.OKBLUE}Executing command: {' '.join(command)}{Colors.ENDC}")
-    if cwd:
-        print(f"{Colors.OKBLUE}In working directory: {cwd}{Colors.ENDC}")
-    try:
-        process = subprocess.Popen(
-            command,
+    async def start(self):
+        """Starts the server process and waits for it to be ready."""
+        print("🚀 Starting llama.cpp server...")
+        print(f"   Command: {' '.join(self.command)}")
+        self.process = subprocess.Popen(
+            self.command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding='utf-8',
-            bufsize=1,
-            cwd=cwd,
-            env=env
+            bufsize=1
         )
-        for line in process.stdout:
-            print(line, end='')
-            if log_writer:
-                log_writer.write(line)
-        process.wait()
-        if process.returncode != 0:
-            print(f"\n{Colors.FAIL}Error: {step_name} failed with return code {process.returncode}.{Colors.ENDC}")
-            # If logging was enabled, tell the user where to find the detailed log
-            if log_file:
-                print(f"{Colors.OKCYAN}A detailed build log has been saved to:{Colors.ENDC}")
-                print(f"{Colors.BOLD}{log_file}{Colors.ENDC}")
-            sys.exit(1)
-        print(f"{Colors.OKGREEN}--- {step_name} completed successfully. ---\n{Colors.ENDC}")
-    except Exception as e:
-        print(f"{Colors.FAIL}An unexpected error occurred during '{step_name}': {e}{Colors.ENDC}")
-        if log_file:
-            print(f"{Colors.OKCYAN}A partial build log may be available at: {log_file}{Colors.ENDC}")
-        sys.exit(1)
-    finally:
-        # Ensure the log file is always closed
-        if log_writer:
-            log_writer.close()
 
-# --- ⭐ NEW: The Environment Smasher ---
-def get_msvc_environment() -> dict:
-    """
-    Finds the Visual Studio C++ Build Tools installation and runs vcvarsall.bat
-    to capture the complete, authoritative build environment.
-    """
-    print(f"{Colors.HEADER}--- Finding and Capturing MSVC Build Environment ---{Colors.ENDC}")
-    
-    vswhere_path = Path(os.environ.get("ProgramFiles(x86)")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
-    if not vswhere_path.exists():
-        print(f"{Colors.FAIL}FATAL: 'vswhere.exe' not found. Cannot locate Visual Studio.{Colors.ENDC}")
-        sys.exit(1)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._wait_for_startup)
 
-    # This is the robust command to find any installation (IDE or Build Tools)
-    # that has the necessary C++ compiler toolset.
-    cmd = [
-        str(vswhere_path),
-        "-latest",
-        "-products", "*",
-        "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-        "-property", "installationPath",
-        "-format", "json"
-    ]
-    
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    install_info = json.loads(result.stdout)
+    def _wait_for_startup(self):
+        """
+        Monitors the server's stdout to confirm it has started AND loaded the model.
+        """
+        if not self.process or not self.process.stdout:
+            return
 
-    # Add a clear error message if no installation is found.
-    if not install_info:
-        print(f"{Colors.FAIL}FATAL: No Visual Studio installation with C++ Build Tools found.{Colors.ENDC}")
-        print(f"{Colors.OKCYAN}Please install Visual Studio 2022 with the 'Desktop development with C++' workload.{Colors.ENDC}")
-        sys.exit(1)
+        for line in iter(self.process.stdout.readline, ''):
+            print(f"[llama.cpp server]: {line.strip()}")
+            if "main: model loaded" in line:
+                print("✅ llama.cpp server has loaded the model and is ready.")
+                return
+            if self.process.poll() is not None:
+                print("❌ llama.cpp server failed to start or exited prematurely.")
+                return
 
-    vs_install_path = Path(install_info[0]['installationPath'])
-    
-    vcvarsall_path = vs_install_path / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
-    if not vcvarsall_path.exists():
-        print(f"{Colors.FAIL}FATAL: 'vcvarsall.bat' not found at expected path: {vcvarsall_path}{Colors.ENDC}")
-        sys.exit(1)
-
-    print(f"{Colors.OKGREEN}Found vcvarsall.bat: {vcvarsall_path}{Colors.ENDC}")
-
-    command = f'call "{vcvarsall_path}" x64 && set'
-    result = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
-    
-    env = os.environ.copy()
-    for line in result.stdout.splitlines():
-        if '=' in line:
-            key, value = line.split('=', 1)
-            # --- ⭐ THIS IS THE FIX. SLAM THE KEY TO UPPERCASE. ⭐ ---
-            env[key.upper()] = value
-            
-
-    print(f"{Colors.OKGREEN}Successfully captured MSVC environment.{Colors.ENDC}\n")
-    #print(f"repr:\n{repr(env)}")
-    return env
+    async def stop(self):
+        """Stops the server process gracefully."""
+        if self.process:
+            print("🛑 Stopping llama.cpp server...")
+            self.process.terminate()
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: self.process.wait(timeout=5)
+                )
+            except subprocess.TimeoutExpired:
+                print("   Server did not terminate gracefully, forcing kill.")
+                self.process.kill()
+            print("   Server stopped.")
 
 
-def ensure_uv_is_available():
-    """
-    Checks if 'uv' is installed. If not, installs it using pip.
-    This is the core of the self-bootstrapping logic.
-    """
-    # Use importlib to check if the 'uv' module can be found.
-    # This is more reliable than checking the PATH.
-    spec = importlib.util.find_spec("uv")
-    if spec is None:
-        print(f"{Colors.WARNING}'uv' is not installed. Attempting to install it now...{Colors.ENDC}")
-        # Use the current Python interpreter to run pip, ensuring uv is installed
-        # for this Python version. This is the most robust method.
-        run_command(
-            [sys.executable, "-m", "pip", "install", "uv"],
-            "Bootstrapping: Installing 'uv'"
-        )
+# --- 3. External Logit Processing (Unchanged) ---
+class LogitProcessor:
+    def __init__(self):
+        self._queue = asyncio.Queue()
+        self._worker_task = None
+
+    async def start(self):
+        self._worker_task = asyncio.create_task(self._process_logits())
+        print("📊 Logit processor started.")
+
+    async def stop(self):
+        if self._worker_task:
+            self._worker_task.cancel()
+            print("   Logit processor stopped.")
+
+    async def submit_logits(self, logits_data: list):
+        await self._queue.put(logits_data)
+
+    async def _process_logits(self):
+        while True:
+            try:
+                logits = await self._queue.get()
+                print(f"[Logit Processor]: Received {len(logits)} logits for analysis.")
+                top_token = logits[0]['token']
+                top_prob = logits[0]['probability']
+                print(f"    -> Top predicted token: {repr(top_token)} ({top_prob*100:.2f}%)")
+                self._queue.task_done()
+            except asyncio.CancelledError:
+                break
+
+
+# --- 4. Batched Inference Manager (Unchanged) ---
+class RequestContext(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    request_data: Dict[str, Any]
+    future: asyncio.Future
+
+class BatchingManager:
+    def __init__(self, server_url: str, client_session: aiohttp.ClientSession):
+        self.server_url = f"{server_url}/v1/completions"
+        self.client_session = client_session
+        self._queue = asyncio.Queue()
+        self._worker_task = None
+
+    async def start(self):
+        self._worker_task = asyncio.create_task(self._batch_processor())
+        print("📦 Batching manager started.")
+
+    async def stop(self):
+        if self._worker_task:
+            self._worker_task.cancel()
+            print("   Batching manager stopped.")
+
+    async def submit_request(self, request_data: Dict[str, Any]) -> Any:
+        future = asyncio.get_running_loop().create_future()
+        await self._queue.put(RequestContext(request_data=request_data, future=future))
+        return await future
+
+    async def _batch_processor(self):
+        while True:
+            try:
+                batch: List[RequestContext] = []
+                first_ctx = await self._queue.get()
+                batch.append(first_ctx)
+
+                while len(batch) < MAX_BATCH_SIZE:
+                    try:
+                        ctx = await asyncio.wait_for(
+                            self._queue.get(),
+                            timeout=BATCH_TIMEOUT_SECONDS
+                        )
+                        batch.append(ctx)
+                    except asyncio.TimeoutError:
+                        break
+                
+                print(f"[Batch Processor]: Assembled batch of {len(batch)} request(s).")
+                
+                batch_payload = batch[0].request_data.copy()
+                if len(batch) > 1:
+                    batch_payload["prompt"] = [ctx.request_data["prompt"] for ctx in batch]
+                else:
+                    batch_payload["prompt"] = batch[0].request_data["prompt"]
+                
+                try:
+                    async with self.client_session.post(self.server_url, json=batch_payload) as response:
+                        response.raise_for_status()
+                        results = await response.json()
+
+                        if len(batch) == 1:
+                            if isinstance(results, dict):
+                                batch[0].future.set_result(results)
+                            else:
+                                raise TypeError(f"Expected a dict for single request, but got {type(results)}")
+                        else:
+                            if isinstance(results, list) and len(results) == len(batch):
+                                for i, ctx in enumerate(batch):
+                                    ctx.future.set_result(results[i])
+                            else:
+                                raise TypeError(f"Expected a list of {len(batch)} items for batch request, got {type(results)} of length {len(results) if isinstance(results, list) else 'N/A'}")
+
+                except Exception as e:
+                    print(f"❌ Error processing batch: {type(e).__name__}: {e}")
+                    for ctx in batch:
+                        ctx.future.set_exception(e)
+
+            except asyncio.CancelledError:
+                break
+
+
+# --- 5. FastAPI Application ---
+class CompletionRequest(BaseModel):
+    prompt: str
+    max_tokens: int = 50
+    stream: bool = False
+    n_probs: int = Field(alias="n_probs", default=0)
+    include_logits: bool = Field(alias="include_logits", default=False)
+    include_bigram_logits: bool = Field(alias="include_bigram_logits", default=False)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global client_session, batching_manager, llama_server_process, server_manager
+    print("--- Application Lifespan: Startup ---")
+    client_session = aiohttp.ClientSession()
+    server_executable_path = DEFAULT_SERVER_PATH
+    print(f"Starting llama.cpp server from: {server_executable_path}")
+    server_manager = ServerLifecycleManager(server_executable_path, MODEL_PATH, SERVER_HOST, SERVER_PORT)
+    batching_manager = BatchingManager(server_manager.server_url, client_session)
+
+    await server_manager.start()
+    await logit_processor.start()
+    await batching_manager.start()
+    yield
+    print("\n--- Application Lifespan: Shutdown ---")
+    if batching_manager: await batching_manager.stop()
+    await logit_processor.stop()
+    if client_session: await client_session.close()
+    await server_manager.stop()
+
+app = FastAPI(title="Llama.cpp API Wrapper", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+logit_processor = LogitProcessor()
+client_session: Optional[aiohttp.ClientSession] = None
+batching_manager: Optional[BatchingManager] = None
+server_manager: Optional[ServerLifecycleManager] = None
+
+@app.get("/")
+async def read_index():
+    return FileResponse('static/index.html')
+
+@app.post("/v1/completions")
+async def handle_completion(request: CompletionRequest, raw_request: Request):
+    request_data = await raw_request.json()
+    if request.stream:
+        async def stream_generator():
+            try:
+                async with client_session.post(
+                    f"{server_manager.server_url}/v1/completions",
+                    json=request_data,
+                    timeout=aiohttp.ClientTimeout(total=3600)
+                ) as response:
+                    async for line in response.content:
+                        yield line
+            except Exception as e:
+                print(f"Error during streaming proxy: {e}")
+        return StreamingResponse(stream_generator(), media_type="text/event-stream")
     else:
-        print(f"{Colors.OKGREEN}'uv' is already installed. Proceeding.{Colors.ENDC}\n")
+        try:
+            result = await batching_manager.submit_request(request_data)
+            if "full_context_logits" in result:
+                await logit_processor.submit_logits(result["full_context_logits"])
+            return JSONResponse(content=result)
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": str(e)})
 
-# We modify get_git_repo to accept and use a specific commit/tag
-def get_git_repo(url, target_dir, commit="main"):
-    """Clones a git repository and checks out a specific commit/tag."""
-    target_path = Path(target_dir)
-    if target_path.exists():
-        print(f"{Colors.OKBLUE}Directory '{target_dir}' already exists. Checking commit...{Colors.ENDC}\n")
-        # You could add logic here to check if the commit is correct, but for now we assume it is.
-        return
+def parse_sse_event(line: bytes) -> Optional[Dict[str, Any]]:
+    line_str = line.decode('utf-8').strip()
+    if line_str.startswith('data: '):
+        json_str = line_str[len('data: '):]
+        if "[DONE]" in json_str:
+            return None
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            return None
+    return None
 
+def format_logprobs(choice: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    logprobs_obj = choice.get("logprobs")
+    if logprobs_obj and logprobs_obj.get("content"):
+        top_logprobs_list = logprobs_obj["content"][0].get("top_logprobs", [])
+        formatted = []
+        for item in top_logprobs_list:
+            formatted.append({
+                "token": item.get("token"),
+                "probability": math.exp(item.get("logprob", -float('inf')))
+            })
+        return formatted
+    return None
+
+@app.websocket("/ws/generate")
+async def websocket_generate(websocket: WebSocket):
+    await websocket.accept()
     try:
-        import git
-    except ImportError:
-        run_command([sys.executable, "-m", "uv", "pip", "install", "GitPython"], "Installing GitPython")
-        import git
+        config_data = await websocket.receive_json()
+        request_data = {
+            "prompt": config_data.get("prompt", ""),
+            "max_tokens": config_data.get("max_tokens", 200),
+            "stream": True, "n_probs": 5,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{LLAMA_CPP_URL}/v1/completions", json=request_data,
+                timeout=aiohttp.ClientTimeout(total=3600)
+            ) as response:
+                response.raise_for_status()
+                async for line in response.content:
+                    parsed_data = parse_sse_event(line)
+                    if parsed_data:
+                        choice = parsed_data.get("choices", [{}])[0]
+                        content = choice.get("text", "")
+                        await websocket.send_json({
+                            "content": content, "logprobs": format_logprobs(choice)
+                        })
+        await websocket.send_json({"status": "done"})
+    except Exception as e:
+        print(f"❌ Error in WebSocket handler: {type(e).__name__}: {e}")
+    finally:
+        print("🛑 WebSocket session ended.")
 
-    print(f"{Colors.HEADER}--- Cloning {url} at commit/tag '{commit}' ---{Colors.ENDC}")
-    repo = git.Repo.clone_from(url, target_path)
-    
-    # Check out the specific commit after cloning
-    if commit != "main":
-        repo.git.checkout(commit)
-    
-    print(f"{Colors.OKGREEN}--- Clone complete ---\n{Colors.ENDC}")
+class TokenizeRequest(BaseModel): content: str
+class DetokenizeRequest(BaseModel): tokens: List[int]
 
+@app.post("/v1/tokenize")
+async def handle_tokenize(request: TokenizeRequest):
+    try:
+        async with client_session.post(f"{LLAMA_CPP_URL}/tokenize", json={"content": request.content}) as response:
+            response.raise_for_status()
+            return JSONResponse(content=await response.json())
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
-def main():
-    """
-    Main function to orchestrate the entire setup process.
-    """
-    parser = argparse.ArgumentParser(description="Bootstrap and build the llama.cpp environment.")
-    parser.add_argument(
-        '--with-cuda',
-        action='store_true',
-        help="Attempt to build llama.cpp with CUDA support. (Default on Linux, Opt-in on Windows)"
-    )
-    args = parser.parse_args()
+@app.post("/v1/detokenize")
+async def handle_detokenize(request: DetokenizeRequest):
+    try:
+        async with client_session.post(f"{LLAMA_CPP_URL}/detokenize", json={"tokens": request.tokens}) as response:
+            response.raise_for_status()
+            return JSONResponse(content=await response.json())
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
-    print(f"{Colors.BOLD}Starting project setup...\n{Colors.ENDC}")
+# --- UPDATED: Context Slicing Endpoint ---
+class ContextProbeRequest(BaseModel):
+    prompt: str
+    n_probs: int = 1000
+    # ⭐ CHANGED: Accept an integer to generate slices dynamically
+    num_slices: int = Field(default=4, ge=2, le=10)
 
-    LLAMACPP_DIR = Path("llama.cpp")
-    SETUP_PY_SOURCE = Path("trickery/setup.py")
-    build_log_path = LLAMACPP_DIR / "build_log.txt"
-    LLAMACPP_VERSION = "b6208"
+@app.post("/v1/probe_context_slices")
+async def probe_context_slices(request: ContextProbeRequest):
+    print(f"🔎 Probing {request.num_slices} context slices for prompt: '{request.prompt[:50]}...'")
+    try:
+        async with client_session.post(f"{LLAMA_CPP_URL}/tokenize", json={"content": request.prompt}) as response:
+            response.raise_for_status()
+            tokens = (await response.json()).get("tokens", [])
+            if not tokens:
+                return JSONResponse(status_code=400, content={"error": "Prompt could not be tokenized."})
 
-    ensure_uv_is_available()
-    run_command([sys.executable, "-m", "uv", "sync"], "Step 1: Installing Python build dependencies")
-    get_git_repo("https://github.com/ggerganov/llama.cpp.git", LLAMACPP_DIR, commit=LLAMACPP_VERSION)
-    if not SETUP_PY_SOURCE.exists():
-        print(f"{Colors.FAIL}Error: The build script at '{SETUP_PY_SOURCE}' was not found.{Colors.ENDC}")
-        sys.exit(1)
-    print(f"{Colors.HEADER}--- Step 2: Preparing llama.cpp for building ---{Colors.ENDC}")
-    shutil.copy(SETUP_PY_SOURCE, LLAMACPP_DIR / "setup.py")
-    print(f"Copied '{SETUP_PY_SOURCE}' to '{LLAMACPP_DIR / 'setup.py'}'")
+        # ⭐ CHANGED: Generate slice factors dynamically
+        slice_factors = [1.0 / (2**i) for i in range(request.num_slices)]
+        
+        token_slices = []
+        for factor in slice_factors:
+            start_index = len(tokens) - int(len(tokens) * factor)
+            token_slices.append(tokens[start_index:])
 
-    # LLAMACPP COMPILER ARGUMENT HANDLING!!! WOOOO!!! WHO DOESN'T LOVE COMPILER ARGUMENT DRUDGERY?!?!
-    cmake_args = {
-        #"GGML_CUDA": "ON",      # Use the new, non-deprecated flag for GPU acceleration.
-        "LLAMA_CURL": "ON",     # We require CURL for web requests.
-    }
-    build_with_cuda = False
-    if sys.platform == "win32":
-        build_env = get_msvc_environment()
-        dependency_args = handle_windows_dependencies(LLAMACPP_DIR)
-        cmake_args.update(dependency_args)
-        if args.with_cuda:
-            print(f"{Colors.WARNING}--- Attempting experimental CUDA build on Windows as requested. ---{Colors.ENDC}")
-            build_with_cuda = True
-        else:
-            print(f"{Colors.OKBLUE}--- Configuring for a CPU-only build on Windows (default). ---{Colors.ENDC}")
-            print(f"{Colors.OKCYAN}Note: To attempt a CUDA build, re-run with the --with-cuda flag.{Colors.ENDC}")
-            print(f"{Colors.OKCYAN}This requires patching this script to supply NVCC 'toolset' configuration.{Colors.ENDC}\n")
-            # Explicitly disable CUDA
-            cmake_args.update({"GGML_CUDA":"OFF"})
-    else: # Linux and other platforms
-        if not args.with_cuda:
-            print(f"{Colors.OKBLUE}--- Configuring for a CUDA build on Linux (default). ---{Colors.ENDC}")
-            build_with_cuda = True
-        else:
-            # no-accelerator linux users who are trying to install this on a steam deck should reconsider their actions
-            build_with_cuda = True
-    if build_with_cuda:
-        cmake_args.update({"GGML_CUDA":"ON"})
+        detokenize_tasks = [client_session.post(f"{LLAMA_CPP_URL}/detokenize", json={"tokens": ts}) for ts in token_slices]
+        detokenize_responses = await asyncio.gather(*detokenize_tasks)
+        prompt_slices = [(await resp.json()).get("content", "") for resp in detokenize_responses]
 
-    # 3. Format the arguments for the environment variable.
-    cmake_args_str = " ".join(f'-D{key}="{value}"' for key, value in cmake_args.items())
-    os.environ["CMAKE_ARGS"] = cmake_args_str
-    print(f"{Colors.HEADER}--- CMAKE_ARGS configured for build ---\n{cmake_args_str}\n{Colors.ENDC}")
+        inference_tasks = [
+            batching_manager.submit_request({
+                "prompt": prompt_text, "max_tokens": 1, "n_probs": request.n_probs
+            }) for prompt_text in prompt_slices
+        ]
+        inference_results = await asyncio.gather(*inference_tasks)
 
-    run_command(
-        [sys.executable, "setup.py", "build_ext"],
-        "Step 3: Building llama.cpp C++ server via custom setup.py",
-        cwd=LLAMACPP_DIR,
-        log_file=build_log_path # Pass the path for the log file
-    )
+        final_results = []
+        for i, raw_result in enumerate(inference_results):
+            choice = raw_result.get("choices", [{}])[0]
+            final_results.append({
+                "slice_factor": slice_factors[i],
+                "prompt_slice": prompt_slices[i],
+                "logprobs": format_logprobs(choice) or []
+            })
 
-    # Step 3: Run the model download script using the new environment.
-    run_command(
-        [sys.executable, "-m", "uv", "run", "python", "download_model.py"],
-        "Step 2: Downloading the GGUF model"
-    )
+        return JSONResponse(content=final_results)
 
-    print(f"{Colors.OKGREEN}{Colors.BOLD}🎉 Setup complete! 🎉{Colors.ENDC}")
-    print("The llama.cpp server executable should be in the 'llama.cpp/build' directory.")
-    print("You can now start the server by running:")
-    # The exact output path might need adjustment based on the setup.py
-    print(f"{Colors.OKCYAN}./llama.cpp/build/bin/server -m models/your_model.gguf{Colors.ENDC}")
+    except Exception as e:
+        print(f"❌ Error during context slice probe: {type(e).__name__}: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
-if __name__ == "__main__": 
-    main()
+# --- Run the API Server ---
+if __name__ == "__main__":
+    print(f"🔥 Starting FastAPI wrapper server on http://127.0.0.1:{API_PORT}")
+    uvicorn.run(app, host="127.0.0.1", port=API_PORT)

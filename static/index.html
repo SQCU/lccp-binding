@@ -19,7 +19,7 @@
         <!-- Tab Content Panes -->
         <div class="tab-content">
 
-            <!-- Pane 1: Multi-Stream Generator (Our existing UI) -->
+            <!-- Pane 1: Multi-Stream Generator (Unchanged) -->
             <div id="pane-multi-stream" class="tab-pane active">
                 <p>Generate multiple, parallel text streams from chained prompts.</p>
                 <div class="input-area">
@@ -34,11 +34,10 @@
                 <div id="streams-container"></div>
             </div>
 
-            <!-- Pane 2: Context Slice Logit Explorer (The new UI) -->
+            <!-- Pane 2: Context Slice Logit Explorer -->
             <div id="pane-ngram" class="tab-pane">
                 <p>
-                    Input a phrase to see how the model's next-token predictions change as its context is reduced.
-                    This helps reveal the model's "short-sighted" choices.
+                    Input a phrase to see how the model's next-token predictions change as its context is reduced, or process the logits to create a new sampling distribution.
                 </p>
                 <div class="input-area">
                      <textarea id="ngram-input" class="prompt-input" rows="5" placeholder="Type a word or phrase..."></textarea>
@@ -47,7 +46,36 @@
                     </div>
                 </div>
                 
-                <!-- ⭐ NEW: Filter Controls ⭐ -->
+                <!-- ⭐ NEW: Sampling Controls -->
+                <div class="sampling-controls-container">
+                     <div class="toggle-switch-group">
+                         <label class="switch">
+                             <input type="checkbox" id="process-logit-toggle">
+                             <span class="slider-toggle"></span>
+                         </label>
+                         <label for="process-logit-toggle" class="switch-label">[PROCESS LOGIT]</label>
+                     </div>
+                     <div id="mmm-slider-container" class="slider-group disabled">
+                        <label for="mmm-slider" id="mmm-label">[SAMPLE LOGIT] Markov Momentum Multiplier: 1.00</label>
+                        <input type="range" id="mmm-slider" min="-5.0" max="5.0" value="1.0" step="0.01">
+                     </div>
+                </div>
+
+
+                <!-- Probe Parameters -->
+                <div class="probe-params-container">
+                    <h3>Probe Parameters</h3>
+                    <div class="slider-group">
+                        <label for="num-slices-slider" id="num-slices-label">Number of Slices: 4</label>
+                        <input type="range" id="num-slices-slider" min="2" max="7" value="4" step="1">
+                    </div>
+                    <div class="slider-group">
+                        <label for="momentum-p-mass-slider" id="momentum-p-mass-label">P-Mass Filter: 0.9000</label>
+                        <input type="range" id="momentum-p-mass-slider" min="0" max="1.0" value="0.95" step="0.001">
+                    </div>
+                </div>
+
+                <!-- Filter Controls -->
                 <div id="filter-controls" class="filter-controls-container">
                     <h3>Filter Controls</h3>
                     <div class="slider-group">
