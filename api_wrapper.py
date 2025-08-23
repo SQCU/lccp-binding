@@ -3,6 +3,7 @@ import subprocess
 import json
 import time
 import sys # <-- Import sys for platform checking
+import math
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -411,6 +412,126 @@ async def websocket_generate(websocket: WebSocket):
         await websocket.send_json({"error": f"{type(e).__name__}: {e}"})
     finally:
         print("🛑 WebSocket session ended.")
+
+class TokenizeRequest(BaseModel):
+    content: str
+
+class DetokenizeRequest(BaseModel):
+    tokens: List[int]
+
+@app.post("/v1/tokenize")
+async def handle_tokenize(request: TokenizeRequest):
+    """Relays a tokenize request to the llama.cpp server."""
+    try:
+        async with client_session.post(
+            f"{LLAMA_CPP_URL}/tokenize",
+            json={"content": request.content}
+        ) as response:
+            response.raise_for_status()
+            data = await response.json()
+            return JSONResponse(content=data)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.post("/v1/detokenize")
+async def handle_detokenize(request: DetokenizeRequest):
+    """Relays a detokenize request to the llama.cpp server."""
+    try:
+        async with client_session.post(
+            f"{LLAMA_CPP_URL}/detokenize",
+            json={"tokens": request.tokens}
+        ) as response:
+            response.raise_for_status()
+            data = await response.json()
+            return JSONResponse(content=data)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# --- NEW: Context Slicing Endpoint ---
+class ContextProbeRequest(BaseModel):
+    prompt: str
+    n_probs: int = 1000
+    slices: List[float] = Field(default_factory=lambda: [1.0, 0.5, 0.25, 0.125])
+
+
+def format_logprobs(choice: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """Extracts and formats logprobs from a choice object."""
+    logprobs_obj = choice.get("logprobs")
+    if logprobs_obj and logprobs_obj.get("content"):
+        top_logprobs_list = logprobs_obj["content"][0].get("top_logprobs", [])
+        formatted = []
+        for item in top_logprobs_list:
+            formatted.append({
+                "token": item.get("token"),
+                "probability": math.exp(item.get("logprob", -float('inf')))
+            })
+        return formatted
+    return None
+
+@app.post("/v1/probe_context_slices")
+async def probe_context_slices(request: ContextProbeRequest):
+    """
+    Takes a prompt, slices it into trailing subsequences, and gets next-token
+    logits for each slice in parallel.
+    """
+    print(f"🔎 Probing context slices for prompt: '{request.prompt[:50]}...'")
+    try:
+        # 1. Tokenize the full prompt
+        async with client_session.post(f"{LLAMA_CPP_URL}/tokenize", json={"content": request.prompt}) as response:
+            response.raise_for_status()
+            token_data = await response.json()
+            tokens = token_data.get("tokens", [])
+            if not tokens:
+                return JSONResponse(status_code=400, content={"error": "Prompt could not be tokenized."})
+
+        # 2. Create token slices
+        token_slices = []
+        for factor in request.slices:
+            if factor <= 0 or factor > 1: continue
+            start_index = len(tokens) - int(len(tokens) * factor)
+            token_slices.append(tokens[start_index:])
+
+        # 3. Detokenize all slices concurrently
+        detokenize_tasks = []
+        for ts in token_slices:
+            task = client_session.post(f"{LLAMA_CPP_URL}/detokenize", json={"tokens": ts})
+            detokenize_tasks.append(task)
+        detokenize_responses = await asyncio.gather(*detokenize_tasks)
+
+        prompt_slices = []
+        for resp in detokenize_responses:
+            resp.raise_for_status()
+            data = await resp.json()
+            prompt_slices.append(data.get("content", ""))
+
+        # 4. Submit all sliced prompts for inference concurrently via the batching manager
+        inference_tasks = []
+        for prompt_text in prompt_slices:
+            payload = {
+                "prompt": prompt_text,
+                "max_tokens": 1,
+                "n_probs": request.n_probs
+            }
+            task = batching_manager.submit_request(payload)
+            inference_tasks.append(task)
+        inference_results = await asyncio.gather(*inference_tasks)
+
+        # 5. Format the final response
+        final_results = []
+        for i, raw_result in enumerate(inference_results):
+            choice = raw_result.get("choices", [{}])[0]
+            final_results.append({
+                "slice_factor": request.slices[i],
+                "prompt_slice": prompt_slices[i],
+                "logprobs": format_logprobs(choice) or []
+            })
+
+        return JSONResponse(content=final_results)
+
+    except Exception as e:
+        print(f"❌ Error during context slice probe: {type(e).__name__}: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 # --- 6. Run the API Server ---
 if __name__ == "__main__":
