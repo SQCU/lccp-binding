@@ -19,6 +19,17 @@ or
 `navigate to http://127.0.0.1:8080 in ur browser`
 `script new behaviors in web client, sample code operating over logits attached for reference` 
 
+### step 4:
+```
+slap some text in the prototype web client
+hit 'probe context slices' to drag the probability mass filter around
+look at low-probability items with large differences in log-odds from a full-context query
+hit [PROCESS LOGIT] to mutate the logit distribution with this difference
+enable [SAMPLE LOGIT] and [AUTOREGRESS] if you want probed context slices 
+to continually resample a decoding chain biased by your MARKOV MOMENTUM MULTIPLIER
+```
+
+
 ## llayout
 ```
 lcpp-binding/
