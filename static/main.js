@@ -1,145 +1,325 @@
 document.addEventListener("DOMContentLoaded", () => {
     // --- 1. DEFINE ALL DOM ELEMENTS ---
+    const tabBtnMultiStream = document.getElementById('tab-btn-multi-stream');
+    const tabBtnNgram = document.getElementById('tab-btn-ngram');
+    const paneMultiStream = document.getElementById('pane-multi-stream');
+    const paneNgram = document.getElementById('pane-ngram');
     const ngramInput = document.getElementById('ngram-input');
     const ngramProbeBtn = document.getElementById('ngram-probe-btn');
     const ngramResultsContainer = document.getElementById('ngram-results-container');
+    
     // Sampling controls
     const processLogitToggle = document.getElementById('process-logit-toggle');
     const mmmSliderContainer = document.getElementById('mmm-slider-container');
     const mmmSlider = document.getElementById('mmm-slider');
     const mmmLabel = document.getElementById('mmm-label');
-    // Probe parameter controls
+    const sampleLogitToggleGroup = document.getElementById('sample-logit-toggle-group');
+    const sampleLogitToggle = document.getElementById('sample-logit-toggle');
+    const autoregressToggleGroup = document.getElementById('autoregress-toggle-group');
+    const autoregressToggle = document.getElementById('autoregress-toggle');
+    const autoregressLabel = document.getElementById('autoregress-label');
+    
+    // Config Panels
+    const autoregressPanel = document.getElementById('autoregress-panel');
+    const maxContinuationInput = document.getElementById('max-continuation-input');
+    const maxContinuationLabel = document.getElementById('max-continuation-label');
+
+    // Filter controls & Sample Button
+    const filterControls = document.getElementById('filter-controls');
+    const sampleLogitContainer = document.getElementById('sample-logit-container');
+    const sampleLogitBtn = document.getElementById('sample-logit-btn');
+    const stopAutoregressBtn = document.getElementById('stop-autoregress-btn');
+    
+    // Sliders
     const numSlicesSlider = document.getElementById('num-slices-slider');
     const momentumPMassSlider = document.getElementById('momentum-p-mass-slider');
     const numSlicesLabel = document.getElementById('num-slices-label');
     const momentumPMassLabel = document.getElementById('momentum-p-mass-label');
-    // Filter controls
-    const filterControls = document.getElementById('filter-controls');
     const topKSlider = document.getElementById('top-k-slider');
     const topPSlider = document.getElementById('top-p-slider');
     const minPSlider = document.getElementById('min-p-slider');
     const topKLabel = document.getElementById('top-k-label');
     const topPLabel = document.getElementById('top-p-label');
     const minPLabel = document.getElementById('min-p-label');
-    // Elements for the other tab
-    const tabBtnMultiStream = document.getElementById('tab-btn-multi-stream');
-    const tabBtnNgram = document.getElementById('tab-btn-ngram');
-    const paneMultiStream = document.getElementById('pane-multi-stream');
-    const paneNgram = document.getElementById('pane-ngram');
-    const halfCtxBtn = document.getElementById("half-ctx-btn");
-    const generateBtn = document.getElementById("generate-btn");
-    const promptsContainer = document.getElementById("prompts-container");
-    const streamsContainer = document.getElementById("streams-container");
-
 
     // --- 2. STATE MANAGEMENT ---
     let allLogitContainers = [];
     let rawSliceData = [];
-    let isProcessLogitMode = false;
+    let initialPrompt = "";
+    let isAutoregressRunning = false;
+    // Multi-Stream elements (for completeness)
+    const promptsContainer = document.getElementById("prompts-container");
+    const streamsContainer = document.getElementById("streams-container");
+    const halfCtxBtn = document.getElementById("half-ctx-btn");
+    const generateBtn = document.getElementById("generate-btn");
 
-    // --- 3. SETUP EVENT LISTENERS ---
-    ngramProbeBtn.addEventListener('click', handleProbeClick);
-    processLogitToggle.addEventListener('change', handleModeToggle);
+
+    // --- 3. EVENT LISTENERS ---
+    tabBtnMultiStream.addEventListener('click', () => setActiveTab('multi-stream'));
+    tabBtnNgram.addEventListener('click', () => setActiveTab('ngram'));
+    
+    ngramProbeBtn.addEventListener('click', () => {
+        initialPrompt = ngramInput.value; // Store the prompt on manual probe
+        runProbe();
+    });
+
+    // Toggle Logic
+    processLogitToggle.addEventListener('change', handleToggleChange);
+    sampleLogitToggle.addEventListener('change', handleToggleChange);
+    autoregressToggle.addEventListener('change', handleToggleChange);
+
+    sampleLogitBtn.addEventListener('click', handleSampleClick);
+    stopAutoregressBtn.addEventListener('click', () => { 
+        isAutoregressRunning = false; 
+        setAutoregressUI(false);
+    });
+
+    maxContinuationInput.addEventListener('input', () => {
+        maxContinuationLabel.textContent = `Max Continuation Length: ${maxContinuationInput.value}`;
+    });
+
+    // Slider Listeners
     mmmSlider.addEventListener('input', () => {
-        mmmLabel.textContent = `[SAMPLE LOGIT] Markov Momentum Multiplier: ${parseFloat(mmmSlider.value).toFixed(2)}`;
-        if (isProcessLogitMode) updateDisplay();
+        mmmLabel.textContent = `Markov Momentum Multiplier: ${parseFloat(mmmSlider.value).toFixed(2)}`;
+        if (processLogitToggle.checked) updateDisplay();
     });
     numSlicesSlider.addEventListener('input', () => {
         numSlicesLabel.textContent = `Number of Slices: ${numSlicesSlider.value}`;
     });
     momentumPMassSlider.addEventListener('input', () => {
-        const pMass = getPiecewisePMass();
-        momentumPMassLabel.textContent = `P-Mass Filter: ${pMass.toFixed(4)}`;
+        momentumPMassLabel.textContent = `P-Mass Filter: ${getPiecewisePMass().toFixed(4)}`;
         if (rawSliceData.length > 0) updateDisplay();
     });
-    [topKSlider, topPSlider, minPSlider].forEach(slider => {
-        slider.addEventListener('input', applyAllFilters);
-    });
-    // Listeners for the other tab
-    tabBtnMultiStream.addEventListener('click', () => setActiveTab('multi-stream'));
-    tabBtnNgram.addEventListener('click', () => setActiveTab('ngram'));
-    halfCtxBtn.addEventListener("click", handleHalfContext);
-    generateBtn.addEventListener("click", handleGenerateStreams);
+    [topKSlider, topPSlider, minPSlider].forEach(slider => slider.addEventListener('input', applyAllFilters));
     
-    // Initialize labels
+    // Multi-stream listeners
+    if(halfCtxBtn) halfCtxBtn.addEventListener("click", handleHalfContext);
+    if(generateBtn) generateBtn.addEventListener("click", handleGenerateStreams);
+
+    // Initial UI setup
+    handleToggleChange();
     numSlicesLabel.textContent = `Number of Slices: ${numSlicesSlider.value}`;
     momentumPMassLabel.textContent = `P-Mass Filter: ${getPiecewisePMass().toFixed(4)}`;
-    mmmLabel.textContent = `[SAMPLE LOGIT] Markov Momentum Multiplier: ${parseFloat(mmmSlider.value).toFixed(2)}`;
+    mmmLabel.textContent = `Markov Momentum Multiplier: ${parseFloat(mmmSlider.value).toFixed(2)}`;
+    maxContinuationLabel.textContent = `Max Continuation Length: ${maxContinuationInput.value}`;
 
     // --- 4. CORE LOGIC ---
 
-    function handleModeToggle() {
-        isProcessLogitMode = processLogitToggle.checked;
-        mmmSliderContainer.classList.toggle('disabled', !isProcessLogitMode);
+    function handleToggleChange() {
+        const isProcess = processLogitToggle.checked;
+        const isSample = sampleLogitToggle.checked;
+        const isAutoregress = autoregressToggle.checked;
+
+        mmmSliderContainer.classList.toggle('disabled', !isProcess);
+        sampleLogitToggleGroup.classList.toggle('disabled', !isProcess);
+        if (!isProcess && sampleLogitToggle.checked) {
+            sampleLogitToggle.checked = false;
+        }
+        
+        const isNowSample = processLogitToggle.checked && sampleLogitToggle.checked;
+        autoregressToggleGroup.classList.toggle('disabled', !isNowSample);
+        sampleLogitContainer.classList.toggle('disabled', !isNowSample);
+        if (!isNowSample && autoregressToggle.checked) {
+            autoregressToggle.checked = false;
+        }
+
+        const isNowAutoregress = isNowSample && autoregressToggle.checked;
+        autoregressPanel.style.display = isNowAutoregress ? 'block' : 'none';
+
+        const canAutoregress = isProcess && isSample;
+        autoregressLabel.textContent = canAutoregress ? '[ ! AUTOREGRESS ! ]' : '[ AUTOREGRESS ]';
+        autoregressLabel.classList.toggle('hackerman', canAutoregress);
+
         if (rawSliceData.length > 0) {
             updateDisplay();
         }
     }
+    
+    async function handleSampleClick() {
+        const processedCard = ngramResultsContainer.querySelector('.processed-logit-card');
+        if (!processedCard) return;
 
-    async function handleProbeClick() {
-        if (!ngramInput.value.trim()) return;
-        ngramProbeBtn.disabled = true;
-        ngramProbeBtn.textContent = "Probing...";
-        filterControls.style.display = 'none';
-        ngramResultsContainer.innerHTML = `<p class="placeholder">Tokenizing, running inferences, and analyzing...</p>`;
-        try {
-            const numSlices = parseInt(numSlicesSlider.value, 10);
-            const response = await fetch('/v1/probe_context_slices', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt: ngramInput.value, n_probs: 1000, num_slices: numSlices })
-            });
-            if (!response.ok) throw new Error(`Server error: ${response.status} ${await response.text()}`);
-            rawSliceData = await response.json();
-            if (!Array.isArray(rawSliceData) || rawSliceData.length === 0) throw new Error("Invalid response from server.");
-            updateDisplay(); // Main render call
-            filterControls.style.display = 'grid';
-        } catch (error) {
-            ngramResultsContainer.innerHTML = `<p class="error">${error.message}</p>`;
-        } finally {
-            ngramProbeBtn.disabled = false;
-            ngramProbeBtn.textContent = "Probe Context Slices";
+        const chosenToken = performSampling(processedCard);
+        if (!chosenToken) {
+            if (isAutoregressRunning) {
+                console.log("Sampling returned no token. Stopping autoregression.");
+                isAutoregressRunning = false;
+                setAutoregressUI(false);
+            }
+            return;
+        }
+
+        ngramInput.value += chosenToken;
+        
+        if (autoregressToggle.checked && isAutoregressRunning) {
+            const continuationLength = ngramInput.value.length - initialPrompt.length;
+            if (continuationLength >= parseInt(maxContinuationInput.value, 10)) {
+                console.log("Max continuation length reached.");
+                isAutoregressRunning = false;
+                setAutoregressUI(false);
+            } else {
+                 await runProbe(); // Continue the loop
+            }
         }
     }
     
-    // Main display router
+    function performSampling(card) {
+        const displayTarget = card.querySelector('.logits-display');
+        const visibleItems = Array.from(displayTarget.querySelectorAll('.logit-item:not(.hidden-by-filter)'));
+        if (visibleItems.length === 0) return null;
+
+        const visibleLogits = displayTarget.fullLogitData.filter(logit => 
+            visibleItems.some(item => item.dataset.token === logit.token)
+        );
+
+        const totalVisibleProb = visibleLogits.reduce((sum, item) => sum + item.probability, 0);
+        if (totalVisibleProb === 0) return null;
+        
+        const normalizedLogits = visibleLogits.map(item => ({...item, prob: item.probability / totalVisibleProb }));
+
+        const rand = Math.random();
+        let cumulativeProb = 0;
+        let chosenToken = normalizedLogits[normalizedLogits.length - 1].token;
+
+        for (const item of normalizedLogits) {
+            cumulativeProb += item.prob;
+            if (rand <= cumulativeProb) {
+                chosenToken = item.token;
+                break;
+            }
+        }
+
+        const chosenItemElement = displayTarget.querySelector(`.logit-item[data-token="${CSS.escape(chosenToken)}"]`);
+        if (chosenItemElement) {
+            chosenItemElement.classList.add('sampled');
+            setTimeout(() => chosenItemElement.classList.remove('sampled'), 1500);
+        }
+        return chosenToken;
+    }
+
+    async function runProbe() {
+        if (!ngramInput.value.trim()) return;
+        
+        const isStartingAutoregress = autoregressToggle.checked && !isAutoregressRunning;
+        if (isStartingAutoregress) {
+            isAutoregressRunning = true;
+            setAutoregressUI(true);
+            initialPrompt = ngramInput.value;
+        }
+
+        ngramProbeBtn.disabled = true;
+        ngramProbeBtn.textContent = isAutoregressRunning ? "Running..." : "Probing...";
+        filterControls.style.display = 'none';
+        if(!isAutoregressRunning) ngramResultsContainer.innerHTML = `<p class="placeholder">Tokenizing and running inferences...</p>`;
+
+        try {
+            const response = await fetch('/v1/probe_context_slices', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt: ngramInput.value, n_probs: 1000, slices: generateSlices() })
+            });
+            if (!response.ok) throw new Error(`Server error: ${response.status} ${await response.text()}`);
+            
+            rawSliceData = await response.json();
+            if (!Array.isArray(rawSliceData) || rawSliceData.length === 0) throw new Error("Invalid response from server.");
+            
+            updateDisplay();
+            filterControls.style.display = 'grid';
+
+            if (isAutoregressRunning) {
+                await new Promise(resolve => setTimeout(resolve, 50)); // Short delay for UI update
+                handleSampleClick();
+            }
+
+        } catch (error) {
+            ngramResultsContainer.innerHTML = `<p class="error">${error.message}</p>`;
+            isAutoregressRunning = false; 
+            setAutoregressUI(false);
+        } finally {
+            if (!isAutoregressRunning) {
+                 ngramProbeBtn.disabled = false;
+                 ngramProbeBtn.textContent = "Probe Context Slices";
+            }
+        }
+    }
+
+    function setAutoregressUI(isRunning) {
+        ngramProbeBtn.style.display = isRunning ? 'none' : 'inline-block';
+        stopAutoregressBtn.style.display = isRunning ? 'inline-block' : 'none';
+        ngramInput.readOnly = isRunning;
+    }
+
+    function generateSlices() {
+        const numSlices = parseInt(numSlicesSlider.value, 10);
+        return Array.from({ length: numSlices }, (_, i) => Math.pow(0.5, i));
+    }
+    
     function updateDisplay() {
         ngramResultsContainer.innerHTML = "";
         allLogitContainers = [];
 
-        if (isProcessLogitMode) {
-            renderProcessedLogits();
+        const momentumData = calculateMomentum(rawSliceData);
+
+        if (processLogitToggle.checked) {
+            renderProcessedLogits(momentumData);
         } else {
-            renderAnalysisDisplay();
+            renderAnalysisDisplay(momentumData);
         }
         applyAllFilters();
     }
-
-    // Piecewise P-Mass slider transformation
-    function getPiecewisePMass() {
-        const x = parseFloat(momentumPMassSlider.value); // 0.0 to 1.0
-        const onethird = 1.0 / 3.0;
-        const twothirds = 2.0 / 3.0;
-        
-        if (x < onethird) {
-            // Map [0, 0.33] -> [0, 0.1]
-            return (x / onethird) * 0.1;
-        } else if (x < twothirds) {
-            // Map [0.33, 0.66] -> [0.1, 0.9]
-            const segment_x = (x - onethird) / onethird; // 0..1
-            return 0.1 + segment_x * 0.8;
-        } else {
-            // Map [0.66, 1.0] -> [0.9, 1.0]
-            const segment_x = (x - twothirds) / onethird; // 0..1
-            return 0.9 + segment_x * 0.1;
-        }
-    }
     
-    // --- 5. DISPLAY & CALCULATION FUNCTIONS ---
+    // ⭐ FIX IS HERE ⭐
+    function calculateMomentum(results) {
+        if (!results || results.length < 2) return [];
+    
+        // Create maps for efficient lookup
+        const longContextMap = new Map(results[0].logprobs.map(i => [i.token, i.probability]));
+        const shortContextMap = new Map(results[results.length - 1].logprobs.map(i => [i.token, i.probability]));
+        // Get a union of all tokens from both contexts
+        const allTokens = new Set([...longContextMap.keys(), ...shortContextMap.keys()]);
+    
+        const topProbOverall = results[0].logprobs[0]?.probability || 1.0;
+        let momentumData = [];
+    
+        // Calculate momentum for ALL tokens
+        for (const token of allTokens) {
+            const endProb = longContextMap.get(token) || 0;   // Probability from the longest context
+            const startProb = shortContextMap.get(token) || 0; // Probability from the shortest context
+            const momentum = endProb - startProb;
+    
+            momentumData.push({ token, probability: startProb, momentum, startProb, endProb, topProbOverall });
+        }
+        
+        // Return the full, unfiltered data, sorted by absolute momentum for display ranking
+        return momentumData.sort((a, b) => Math.abs(b.momentum) - Math.abs(a.momentum));
+    }
 
-    // Renders the original analysis view (Momentum + Slices)
-    function renderAnalysisDisplay() {
-        calculateAndRenderMomentum(rawSliceData);
+    // ⭐ FIX IS HERE ⭐
+    function renderAnalysisDisplay(momentumData) {
+        // This function now performs filtering FOR DISPLAY PURPOSES ONLY.
+        const momentumPMass = getPiecewisePMass();
+        const longestContext = rawSliceData[0];
+    
+        // Determine the set of tokens in the top P-Mass of the longest context
+        const longContextTopTokens = new Set();
+        let cumulativeProb = 0;
+        for (const item of longestContext.logprobs) {
+            if (cumulativeProb >= momentumPMass) break;
+            longContextTopTokens.add(item.token);
+            cumulativeProb += item.probability;
+        }
+    
+        // Filter the complete momentum data just for this card
+        const filteredMomentumData = momentumData.filter(item => !longContextTopTokens.has(item.token));
+    
+        createLogitCard(
+            'Contextual Momentum',
+            `How a token's probability changes from the shortest to the full context. Tokens shown were NOT in the top ${(momentumPMass * 100).toFixed(1)}% of the full context. <strong class="pos">Green</strong> means its rank improved, <strong class="neg">Red</strong> means it worsened.`,
+            filteredMomentumData, // Use the filtered data for this card
+            { isMomentum: true, prepend: true }
+        );
+
+        // Render individual slice cards (this part is unchanged)
         const gridContainer = document.createElement('div');
         gridContainer.className = 'context-slice-grid';
         ngramResultsContainer.appendChild(gridContainer);
@@ -152,33 +332,30 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    // Renders the new processed logit sampler view
-    function renderProcessedLogits() {
-        const processedLogits = calculateProcessedLogits();
+    function renderProcessedLogits(momentumData) {
+        // This function receives the FULL, unfiltered momentum data
+        const processedLogits = calculateProcessedLogits(momentumData);
         createLogitCard(
             'Processed Logit Distribution',
-            `New distribution created by applying momentum to tokens within the ${Math.round(getPiecewisePMass() * 100)}% P-Mass filter of the shortest context.`,
+            `New distribution created by applying momentum to tokens within the ${(getPiecewisePMass() * 100).toFixed(1)}% P-Mass filter of the longest context.`,
             processedLogits,
             { isProcessed: true }
         );
     }
     
-    // Core calculation for the sampler mode
-    function calculateProcessedLogits() {
+    function calculateProcessedLogits(momentumData) {
+        // This function also receives the FULL, unfiltered momentum data
         if (rawSliceData.length < 2) return [];
 
         const mmm = parseFloat(mmmSlider.value);
-        const pMassFilter = getPiecewisePMass();
-
         const fullContext = rawSliceData[0];
-        const shortestContext = rawSliceData[rawSliceData.length - 1];
-
-        const fullContextMap = new Map(fullContext.logprobs.map(i => [i.token, i.probability]));
-        const shortestContextMap = new Map(shortestContext.logprobs.map(i => [i.token, i.probability]));
-
+        // The momentumMap is now complete, containing data for all relevant tokens
+        const momentumMap = new Map(momentumData.map(i => [i.token, i.momentum]));
+        
+        const pMassFilter = getPiecewisePMass();
         const tokensToModify = new Set();
         let cumulativeProb = 0;
-        for (const item of shortestContext.logprobs) {
+        for (const item of fullContext.logprobs) {
             if (cumulativeProb >= pMassFilter) break;
             tokensToModify.add(item.token);
             cumulativeProb += item.probability;
@@ -186,15 +363,16 @@ document.addEventListener("DOMContentLoaded", () => {
 
         let processedProbs = [];
         let totalProbSum = 0;
-        for (const [token, fullProb] of fullContextMap.entries()) {
-            let newProb = fullProb;
-            if (tokensToModify.has(token)) {
-                const shortProb = shortestContextMap.get(token) || 0;
-                const momentum = fullProb - shortProb;
-                newProb = fullProb + (mmm * momentum);
+
+        for (const item of fullContext.logprobs) {
+            let newProb = item.probability;
+            // The check is now meaningful because momentumMap is complete
+            if (tokensToModify.has(item.token)) {
+                const momentum = momentumMap.get(item.token) || 0;
+                newProb = item.probability + (mmm * momentum);
             }
             newProb = Math.max(0, newProb);
-            processedProbs.push({ token, rawProb: newProb });
+            processedProbs.push({ token: item.token, rawProb: newProb });
             totalProbSum += newProb;
         }
         
@@ -206,97 +384,47 @@ document.addEventListener("DOMContentLoaded", () => {
 
         return finalLogits.sort((a, b) => b.probability - a.probability);
     }
-
-    // Calculates and renders the momentum view
-    function calculateAndRenderMomentum(results) {
-        // ⭐ FIX IS HERE: Changed getTransformedPMass() to getPiecewisePMass()
-        const momentumPMass = getPiecewisePMass();
-
-        const probMaps = results.map(r => 
-            r.logprobs.reduce((map, item) => (map[item.token] = item.probability, map), {})
-        );
-
-        const longestContext = results[0];
-        const shortestContext = results[results.length - 1];
-        if (!shortestContext || !longestContext) return;
-
-        const longContextTopTokens = new Set();
-        let cumulativeProb = 0;
-        for (const item of longestContext.logprobs) {
-            if (cumulativeProb >= momentumPMass) break;
-            longContextTopTokens.add(item.token);
-            cumulativeProb += item.probability;
-        }
-
-        let momentumData = [];
-        const topProbOverall = longestContext.logprobs[0].probability;
-
-        for (const item of shortestContext.logprobs) {
-            const token = item.token;
-            if (longContextTopTokens.has(token)) continue;
-
-            const startProb = item.probability;
-            const endProb = probMaps[0][token] || 0;
-            const momentum = endProb - startProb;
-            
-            momentumData.push({
-                token, probability: startProb, momentum, startProb, endProb, topProbOverall
-            });
-        }
-        
-        momentumData.sort((a, b) => Math.abs(b.momentum) - Math.abs(a.momentum));
-
-        createLogitCard(
-            'Contextual Momentum',
-            `How a token's probability changes from the shortest to the full context. Tokens shown were NOT in the top ${Math.round(momentumPMass * 100)}% of the full context. <strong class="pos">Green</strong> means its rank improved, <strong class="neg">Red</strong> means it worsened.`,
-            momentumData,
-            { isMomentum: true, prepend: true }
-        );
+    
+    // --- The rest of the utility functions are unchanged ---
+    
+    function getPiecewisePMass() {
+        const x = parseFloat(momentumPMassSlider.value);
+        const onethird = 1.0 / 3.0;
+        const twothirds = 2.0 / 3.0;
+        if (x < onethird) return (x / onethird) * 0.1;
+        if (x < twothirds) return 0.1 + ((x - onethird) / onethird) * 0.8;
+        return 0.9 + ((x - twothirds) / onethird) * 0.1;
     }
-
 
     function createLogitCard(title, description, logitData, options = {}) {
         const card = document.createElement('div');
         card.className = 'context-slice-card';
         if (options.isMomentum) card.classList.add('momentum-card');
         if (options.isProcessed) card.classList.add('processed-logit-card');
-
         let descriptionHtml = options.isPrompt 
             ? `<pre class="prompt-preview" title="${description}">${description.replace(/\n/g, '↵')}</pre>`
             : `<p class="explanation">${description}</p>`;
         card.innerHTML = `<h3>${title}</h3>${descriptionHtml}<div class="logits-display"></div>`;
-        
         const container = options.container || ngramResultsContainer;
-        if (options.prepend) {
-            container.prepend(card);
-        } else {
-            container.appendChild(card);
-        }
-        
+        if (options.prepend) container.prepend(card);
+        else container.appendChild(card);
         const displayTarget = card.querySelector('.logits-display');
         displayTarget.fullLogitData = logitData;
         allLogitContainers.push(displayTarget);
-
-        updateLogitDisplay(logitData, displayTarget, { 
-            highlightWordBoundaries: true, isMomentum: options.isMomentum 
-        });
+        updateLogitDisplay(logitData, displayTarget, { isMomentum: options.isMomentum });
     }
 
     function applyAllFilters() {
         const topK = parseInt(topKSlider.value, 10);
         const topP = parseFloat(topPSlider.value);
         const minP = parseFloat(minPSlider.value);
-
         topKLabel.textContent = `Top-K: ${topK}`;
         topPLabel.textContent = `Top-P: ${topP.toFixed(2)}`;
         minPLabel.textContent = `Min-P: ${(minP * 100).toFixed(2)}%`;
-
         allLogitContainers.forEach(container => {
             const fullData = container.fullLogitData || [];
             if (fullData.length === 0) return;
-            
             let filteredData = fullData.filter(item => item.probability >= minP);
-
             let cumulativeProb = 0;
             const topPData = [];
             for (const item of filteredData) {
@@ -304,9 +432,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 topPData.push(item);
                 cumulativeProb += item.probability;
             }
-            filteredData = topPData;
-            filteredData = filteredData.slice(0, topK);
-
+            filteredData = topPData.slice(0, topK);
             const visibleTokens = new Set(filteredData.map(item => item.token));
             for (const child of container.children) {
                 child.classList.toggle('hidden-by-filter', !visibleTokens.has(child.dataset.token));
@@ -317,20 +443,15 @@ document.addEventListener("DOMContentLoaded", () => {
     function updateLogitDisplay(logprobs, targetElement, options = {}) {
         targetElement.innerHTML = "";
         if (!logprobs || logprobs.length === 0) {
-            targetElement.innerHTML = `<p class="placeholder">No logit data.</p>`;
-            return;
+            targetElement.innerHTML = `<p class="placeholder">No logit data.</p>`; return;
         }
         const topProbability = logprobs[0]?.probability || 1.0;
-
         logprobs.forEach(item => {
             const token = String(item.token);
             const probability = item.probability;
             const logitItem = document.createElement("div");
             logitItem.className = "logit-item";
             logitItem.dataset.token = token;
-            if (options.highlightWordBoundaries && (token.startsWith(' ') || token.startsWith('\n'))) {
-                logitItem.classList.add('word-boundary-token');
-            }
             const tokenLabel = document.createElement("div");
             tokenLabel.className = "token-label";
             const pre = document.createElement('pre');
@@ -359,7 +480,6 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    // --- 6. UTILITY & UNCHANGED FUNCTIONS ---
     function setActiveTab(tabName) {
         paneMultiStream.classList.toggle('active', tabName !== 'ngram');
         tabBtnMultiStream.classList.toggle('active', tabName !== 'ngram');
@@ -387,7 +507,7 @@ document.addEventListener("DOMContentLoaded", () => {
         ws.onopen = () => ws.send(JSON.stringify({ prompt, max_tokens: 200 }));
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
-            if (data.status === "done") return;
+            if (data.status === "done") { ws.close(); return; }
             generatedTextDiv.textContent += data.content;
             if (data.logprobs) {
                 const tempContainer = document.createElement('div');
@@ -395,13 +515,13 @@ document.addEventListener("DOMContentLoaded", () => {
                 logitsDisplayDiv.innerHTML = tempContainer.innerHTML;
             }
         };
+        ws.onerror = (err) => { console.error("WebSocket Error:", err); };
     }
     
     async function handleHalfContext() {
         const allPrompts = promptsContainer.querySelectorAll('.prompt-input');
         const sourcePrompt = allPrompts[allPrompts.length - 1];
         if (!sourcePrompt.value.trim()) return alert("Last prompt box is empty.");
-
         halfCtxBtn.disabled = true;
         halfCtxBtn.textContent = "Processing...";
         try {

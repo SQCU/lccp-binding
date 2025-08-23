@@ -10,76 +10,23 @@ body {
 h1, h2, h3 { color: #ffffff; border-bottom: 2px solid #4a00e0; padding-bottom: 10px; }
 h3 { font-size: 1.1em; border-bottom-style: solid; border-bottom-width: 1px; border-color: #444; margin-top: 0; }
 .input-area { margin-bottom: 20px; background-color: #1e1e1e; padding: 20px; border-radius: 8px; }
-textarea, input[type="text"] { width: 100%; padding: 10px; border-radius: 5px; border: 1px solid #333; background-color: #2a2a2a; color: #e0e0e0; font-size: 16px; resize: vertical; box-sizing: border-box; }
+textarea, input[type="text"], .simple-input { width: 100%; padding: 10px; border-radius: 5px; border: 1px solid #333; background-color: #2a2a2a; color: #e0e0e0; font-size: 16px; resize: vertical; box-sizing: border-box; }
 button { padding: 12px; border: none; border-radius: 5px; background: linear-gradient(90deg, #8e2de2, #4a00e0); color: white; font-size: 18px; font-weight: bold; cursor: pointer; transition: transform 0.2s ease; }
 button:hover { transform: scale(1.02); }
 button:disabled { background: #555; cursor: not-allowed; transform: none; }
 .controls { display: flex; gap: 10px; margin-top: 10px; }
+#stop-autoregress-btn { background: #c0392b; }
 .tab-nav { display: flex; border-bottom: 2px solid #333; margin-bottom: 20px; }
 .tab-btn { padding: 10px 20px; cursor: pointer; border: none; background: none; color: #aaa; font-size: 16px; border-bottom: 3px solid transparent; margin-bottom: -2px; font-weight: 500; }
 .tab-btn.active { color: #fff; border-bottom-color: #8e2de2; }
 .tab-pane { display: none; }
 .tab-pane.active { display: block; }
 
-/* --- Multi Stream Pane Styles --- */
-#prompts-container {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-}
-.derived-prompt {
-    background-color: #222 !important;
-    border-color: #444 !important;
-    color: #aaa !important;
-    cursor: not-allowed;
-}
-#streams-container {
-    margin-top: 30px;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
-    gap: 20px;
-}
-.stream-card {
-    background-color: #1e1e1e;
-    border-radius: 8px;
-    box-shadow: 0 4px 8px rgba(0,0,0,0.3);
-    display: flex;
-    flex-direction: column;
-}
-.stream-card h2 {
-    font-size: 1.2em;
-    padding: 15px 20px;
-    margin: 0;
-    border-bottom: 1px solid #333;
-}
-.stream-content {
-    padding: 20px;
-    display: grid;
-    grid-template-columns: 2fr 1fr;
-    gap: 20px;
-    flex-grow: 1;
-}
-.generated-text {
-    white-space: pre-wrap;
-    font-size: 14px;
-    min-height: 100px;
-    background-color: #121212;
-    padding: 10px;
-    border-radius: 5px;
-}
-
-
 /* --- N-gram / Context Slice Pane Styles --- */
-#ngram-results-container .placeholder, .logits-display .placeholder {
-    color: #888;
-    padding: 10px;
-}
-#ngram-results-container .error {
-    color: #ff6b6b;
-    font-weight: bold;
-}
+#ngram-results-container .placeholder, .logits-display .placeholder { color: #888; padding: 10px; }
+#ngram-results-container .error { color: #ff6b6b; font-weight: bold; }
 
-/* --- Sampling, Parameter, and Filter Controls Styling --- */
+/* ⭐ UPDATED: Sampling Controls Styling ⭐ */
 .sampling-controls-container {
     background-color: #1a1a1a;
     border: 1px solid #333;
@@ -91,8 +38,12 @@ button:disabled { background: #555; cursor: not-allowed; transform: none; }
     gap: 20px;
     align-items: center;
 }
-.toggle-switch-group { display: flex; align-items: center; gap: 15px; }
+.toggle-switch-group { display: flex; align-items: center; gap: 15px; grid-column: 1 / 2; transition: opacity 0.3s ease; }
+.toggle-switch-group.disabled { opacity: 0.4; pointer-events: none; }
+#mmm-slider-container { grid-column: 2 / 3; grid-row: 1 / 2; }
 .switch-label { font-family: 'Courier New', Courier, monospace; font-weight: bold; color: #ccc; }
+/* ⭐ NEW: Hackerman Kitsch Style ⭐ */
+.switch-label.hackerman { color: #e74c3c; font-weight: bold; }
 .switch { position: relative; display: inline-block; width: 60px; height: 34px; }
 .switch input { opacity: 0; width: 0; height: 0; }
 .slider-toggle { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #444; transition: .4s; border-radius: 34px; }
@@ -100,22 +51,31 @@ button:disabled { background: #555; cursor: not-allowed; transform: none; }
 input:checked + .slider-toggle { background-color: #8e2de2; }
 input:checked + .slider-toggle:before { transform: translateX(26px); }
 
-.probe-params-container, .filter-controls-container {
-    background-color: #1e1e1e;
+/* ⭐ NEW: Config Panel Style ⭐ */
+.config-panel {
+    background-color: #222;
+    border: 1px solid #333;
+    border-top: none;
     padding: 20px;
-    border-radius: 8px;
     margin-bottom: 20px;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-    gap: 20px;
+    border-radius: 0 0 8px 8px;
+    display: none; /* Hidden by default */
 }
+
+
+/* --- Parameter and Filter Controls Styling --- */
+.probe-params-container, .filter-controls-container { background-color: #1e1e1e; padding: 20px; border-radius: 8px; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; align-items: center; }
 .filter-controls-container { display: none; }
-.slider-group { display: flex; flex-direction: column; }
+.slider-group { display: flex; flex-direction: column; transition: opacity 0.3s ease; }
 .slider-group.disabled { opacity: 0.4; pointer-events: none; }
 .slider-group label { margin-bottom: 8px; font-weight: 500; color: #ccc; }
 input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 8px; background: #444; border-radius: 5px; outline: none; }
 input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 20px; height: 20px; background: #8e2de2; cursor: pointer; border-radius: 50%; }
 input[type="range"]::-moz-range-thumb { width: 20px; height: 20px; background: #8e2de2; cursor: pointer; border-radius: 50%; }
+
+#sample-logit-container { transition: opacity 0.3s ease; }
+#sample-logit-container.disabled { opacity: 0.4; pointer-events: none; }
+#sample-logit-btn { font-family: 'Courier New', Courier, monospace; font-size: 16px; padding: 10px 16px; background: #27ae60; }
 
 /* --- Cards and Results Grid --- */
 .context-slice-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; margin-top: 20px; }
@@ -127,13 +87,21 @@ input[type="range"]::-moz-range-thumb { width: 20px; height: 20px; background: #
 .prompt-preview { font-family: 'Courier New', Courier, monospace; font-size: 0.8em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background-color: #2a2a2a; padding: 8px; border-radius: 4px; color: #aaa; margin-top: 0; }
 
 /* --- Shared Logit Display Styles --- */
-.logit-item { display: flex; align-items: center; margin-bottom: 5px; font-family: 'Courier New', Courier, monospace; font-size: 14px; transition: all 0.2s ease; overflow: hidden; }
-.logit-item.word-boundary-token { background-color: rgba(142, 45, 226, 0.15); border-radius: 3px; }
-.logit-item.hidden-by-filter { opacity: 0; height: 0; margin-bottom: 0; padding: 0; }
+.logit-item { display: flex; align-items: center; margin-bottom: 5px; font-family: 'Courier New', Courier, monospace; font-size: 14px; transition: all 0.2s ease; overflow: hidden; border: 2px solid transparent; border-radius: 5px; }
+.logit-item.hidden-by-filter { opacity: 0; height: 0; margin-bottom: 0; padding: 0; border: none; }
 .token-label { width: 100px; flex-shrink: 0; white-space: pre; font-weight: bold; }
 .token-label pre { margin: 0; font-family: inherit; font-size: inherit; }
 .prob-bar-container { flex-grow: 1; background-color: #333; border-radius: 4px; height: 20px; min-width: 100px; position: relative; }
 .prob-bar { background: linear-gradient(90deg, #8e2de2, #4a00e0); height: 100%; border-radius: 4px; text-align: right; padding-right: 5px; color: white; font-size: 12px; line-height: 20px; box-sizing: border-box; white-space: nowrap; }
+
+/* --- Sampled Item Highlight --- */
+@keyframes sample-flash {
+    0% { background-color: #27ae60; border-color: #2ecc71; }
+    100% { background-color: transparent; border-color: transparent; }
+}
+.logit-item.sampled {
+    animation: sample-flash 1.5s ease-out;
+}
 
 /* --- Momentum Visualization Styles --- */
 .prob-bar-container.has-momentum::before { content: ''; position: absolute; top: 50%; left: var(--start-pos); width: var(--width); height: 2px; background-color: var(--line-color); transform: translateY(-50%); z-index: 1; }
